@@ -1082,7 +1082,7 @@ const BodyMetricsDashboard = () => {
                     <h3>Progress Graph</h3>
                     {/* Show graph only if not loading/error and entries exist */}
                     {!fetchLoading && !fetchError && entries.length > 0 && (
-                        <div style={{ width: '100%', maxWidth: '800px', margin: '20px auto', height: '400px' }}>
+                        <div style={{ width: '100%', maxWidth: '1280px', margin: '20px auto', height: '720px' }}>
                              {/* Render the Plotly chart */}
                             <Plot
                                 data={plotlyData} // Pass the Plotly-formatted data
