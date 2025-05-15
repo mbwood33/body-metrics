@@ -1,5 +1,5 @@
 // src/components/BodyMetricsDashboard.jsx
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 
 // import { db } from '../firebase';
 // import { collection, addDoc, serverTimestamp, query, orderBy, getDocs, deleteDoc, doc, updateDoc } from 'firebase/firestore';
@@ -17,37 +17,14 @@ import {
 // Import the custom hook for CSV import
 import useCsvImport from '../hooks/useCsvImport.js';
 
-// import { Line } from 'react-chartjs-2';
-// import {
-//     Chart as ChartJS,
-//     CategoryScale,
-//     LinearScale,
-//     PointElement,
-//     LineElement,
-//     Title,
-//     Tooltip,
-//     Legend,
-//     TimeScale
-// } from 'chart.js';
+// Import calculation functions from utils
+import { calculateLinearRegression, calculateDoubleExponentialSmoothing } from '../utils/calculations.js';
 
-// // Import date adapter for Chart.js time scale
-// import 'chartjs-adapter-date-fns';
-
-// ChartJS.register(
-//     CategoryScale,
-//     LinearScale,
-//     PointElement,
-//     LineElement,
-//     Title,
-//     Tooltip,
-//     Legend,
-//     TimeScale
-// );
-
+// Import Plotly React component
 import Plot from 'react-plotly.js';
 
 // import Papa from 'papaparse';
-import { addDays } from 'date-fns';
+import { addDays, differenceInDays } from 'date-fns';   // Import addDays and differenceInDays
 
 // Helper function to get today's date inYYYY-MM-DD format
 const getTodaysDate = () => {
@@ -57,161 +34,6 @@ const getTodaysDate = () => {
     const day = String(today.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
 }
-
-// Helper function for simple linear regression to calculate trend line points
-// Takes an array of { x: number, y: number } points (x is timestamp)
-// Returns an array of { x: number, y: number } points for the trend line
-const calculateLinearRegression = (dataPoints) => {
-    if (dataPoints.length < 2) {
-        return [];  // Need at least two points for a line
-    }
-
-    // Filter out points with invalid x or y values
-    const validPoints = dataPoints.filter(p => typeof p.x === 'number' && !isNaN(p.x) && typeof p.y === 'number' && !isNaN(p.y));
-
-    if (validPoints.length < 2) {
-        return [];
-    }
-
-    // Sort points by x (timestamp) to ensure correct min/max
-    validPoints.sort((a, b) => a.x - b.x);
-
-    // Calculate sums needed for linear regression (y = mx + b)
-    let sumX = 0;
-    let sumY = 0;
-    let sumXY = 0;
-    let sumXX = 0;
-    const n = validPoints.length;
-
-    for (const point of validPoints) {
-        sumX += point.x;
-        sumY += point.y;
-        sumXY += point.x * point.y;
-        sumXX += point.x * point.x;
-    }
-
-    // Calculate slope (m) and y-intercept (b)
-    const denominator = (n * sumXX - sumX * sumX);
-    if (denominator === 0) {
-        return [];  // Avoid division by zero if all x values are the same
-    }
-    const m = (n * sumXY - sumX * sumY) / denominator;
-    const b = (sumY - m * sumX) / n;
-
-    // Calculate the y values for the trend line at the min and max x values
-    const minX = validPoints[0].x;
-    const maxX = validPoints[validPoints.length - 1].x;
-
-    const trendLinePoints = [
-        { x: minX, y: m * minX + b },
-        { x: maxX, y: m * maxX + b },
-    ];
-
-    return trendLinePoints;
-};
-
-/// Helper function for Double Exponential Smoothing (Holt's Method) prediction
-// Takes an array of { x: number, y: number } points (x is timestamp, y is value)
-// alpha: smoothing factor for level (0 to 1)
-// beta: smoothing factor for trend (0 to 1)
-// targetWeight: the weight at which to stop predicting (e.g., 5% body fat weight)
-// Returns an array of { x: number, y: number } points for the prediction
-const calculateDoubleExponentialSmoothing = (dataPoints, alpha, beta, targetWeight) => {
-    console.log('calculateDoubleExponentialSmoothing: Input dataPoints', dataPoints);
-    console.log('calculateDoubleExponentialSmoothing: Input alpha', alpha);
-    console.log('calculateDoubleExponentialSmoothing: Input beta', beta);
-    console.log('calculateDoubleExponentialSmoothing: Input targetWeight', targetWeight);
-
-
-    // Filter and sort valid points
-    const validPoints = dataPoints.filter(p => typeof p.x === 'number' && !isNaN(p.x) && typeof p.y === 'number' && !isNaN(p.y));
-    if (validPoints.length < 2) {
-        console.log('calculateDoubleExponentialSmoothing: Need at least 2 valid points for Double ES.');
-        return []; // Need at least two points for initial level and trend
-    }
-    validPoints.sort((a, b) => a.x - b.x);
-
-    console.log('calculateDoubleExponentialSmoothing: Valid points after filtering and sorting', validPoints);
-
-    // Initialize Level (L) and Trend (T)
-    // A common initialization for Holt's method
-    let Lt = validPoints[0].y; // Initial Level is the first data point's value
-    let Tt = 0; // Initial Trend is often initialized to 0 or the slope between the first two points
-
-    if (validPoints.length > 1) {
-        // Initialize trend using the slope between the first two points
-        const timeDiff = validPoints[1].x - validPoints[0].x;
-        if (timeDiff > 0) {
-            Tt = (validPoints[1].y - validPoints[0].y) / (timeDiff / (1000 * 60 * 60 * 24)); // Trend per day
-        }
-    }
-
-
-    const predictionPoints = [];
-    // Add the last historical point to the prediction line for continuity
-    predictionPoints.push({
-        x: validPoints[validPoints.length - 1].x,
-        y: validPoints[validPoints.length - 1].y
-    });
-
-
-    // Calculate smoothed values for historical data and update L and T
-    for (let i = 1; i < validPoints.length; i++) {
-        const prevLt = Lt;
-        const timeDiff = (validPoints[i].x - validPoints[i-1].x) / (1000 * 60 * 60 * 24); // Time difference in days
-
-        // Holt's method update equations
-        Lt = alpha * validPoints[i].y + (1 - alpha) * (prevLt + Tt * timeDiff);
-        Tt = beta * (Lt - prevLt) + (1 - beta) * Tt;
-
-        console.log(`calculateDoubleExponentialSmoothing: Point ${i}, Lt: ${Lt.toFixed(2)}, Tt: ${Tt.toFixed(2)}`);
-    }
-
-    // Predict future points dynamically until target weight is reached
-    let lastPredictedDate = new Date(validPoints[validPoints.length - 1].x);
-    let predictedWeight = Lt; // Start prediction from the last calculated level
-    let stepsIntoFuture = 1; // Start predicting one day ahead
-
-    const maxPredictionDays = 365 * 5; // Safeguard: Don't predict more than 5 years
-
-    while (predictedWeight > targetWeight && stepsIntoFuture <= maxPredictionDays) {
-        // Forecast using the last calculated Level and Trend
-        predictedWeight = Lt + Tt * stepsIntoFuture;
-
-        // Ensure predicted weight doesn't go below a hard minimum (e.g., 0)
-        predictedWeight = Math.max(predictedWeight, 0);
-
-        const futureDate = addDays(lastPredictedDate, stepsIntoFuture);
-
-        predictionPoints.push({
-            x: futureDate.getTime(),
-            y: predictedWeight
-        });
-
-        console.log(`calculateDoubleExponentialSmoothing: Predicted point ${stepsIntoFuture}, Date: ${futureDate.toLocaleDateString()}, Weight: ${predictedWeight.toFixed(1)}`);
-
-        // If the predicted weight is now at or below the target, stop.
-        if (predictedWeight <= targetWeight) {
-             console.log(`calculateDoubleExponentialSmoothing: Target weight (${targetWeight.toFixed(1)}) reached or surpassed at step ${stepsIntoFuture}. Stopping prediction.`);
-            break;
-        }
-
-        stepsIntoFuture++;
-    }
-
-    // If the loop finished without reaching the target (due to maxPredictionDays),
-    // add a final point at the max prediction date with the last predicted weight.
-    if (stepsIntoFuture > maxPredictionDays) {
-        console.log(`calculateDoubleExponentialSmoothing: Max prediction days (${maxPredictionDays}) reached.`);
-        // The last point added in the loop is already at the max prediction date or earlier if target was met.
-        // If the loop completed because maxPredictionDays was reached *before* target,
-        // the last point in predictionPoints is the final point.
-    }
-
-
-    console.log('calculateDoubleExponentialSmoothing: Final predictionPoints', predictionPoints);
-    return predictionPoints;
-};
 
 
 
@@ -304,10 +126,8 @@ const BodyMetricsDashboard = () => {
     }, [handleFetchEntries]); // handleFetchEntries is a dependency
 
 
-
-    /**
-     * Function to handle submission of the new entry form
-     */
+    // Function to handle submission of the new entry form using the service
+    // Moved this function declaration BEFORE the return statement
     const handleSubmit = async (e) => {
         e.preventDefault();
 
@@ -327,14 +147,14 @@ const BodyMetricsDashboard = () => {
             return;
         }
         if (bodyFat < 0 || bodyFat > 100) {
-            setSaveError('Body Fat Percentage (%) must be between 0 and 100.');
+            setSaveError('Body Fat Percentage (% ) must be between 0 and 100.');
             setSaveMessage('');
             return;
         }
 
-        setSaveError('');
-        setSaveMessage('');
-        setSaveLoading(true);        
+        setSaveError(''); // Clear previous errors
+        setSaveMessage(''); // Clear previous messages
+        setSaveLoading(true); // Indicate saving is in progress
 
         try {
             const dateString = dateRef.current.value;
@@ -369,15 +189,11 @@ const BodyMetricsDashboard = () => {
             setSaveMessage(''); // Clear success message if there's an error
         }
 
-        setSaveLoading(false);
+        setSaveLoading(false); // Saving is complete
     };
 
 
-
-    /**
-     * Function to handle clicking the Edit button
-     * @param {Object} entry - The entry object to be edited
-     */
+// Function to handle clicking the Edit button
     const handleEditClick = (entry) => {
         setIsEditing(true); // Set the state to indicate we are now editing
         setEditingEntryId(entry.id); // Store the ID of the entry to be updated
@@ -405,10 +221,7 @@ const BodyMetricsDashboard = () => {
 
 
 
-    /**
-     * Function to handle input changes within the edit form
-     * @param {Object} e - The event object
-     */
+    // Function to handle input changes within the edit form
     const handleEditInputChange = (e) => {
         const { name, value } = e.target;
 
@@ -430,7 +243,6 @@ const BodyMetricsDashboard = () => {
             // --- End logging ---
             return updatedData; // Return the new state object
         });
-
     };
 
 
@@ -544,227 +356,211 @@ const BodyMetricsDashboard = () => {
 
 
 
-    // --- Prepare data for the chart ---
-    // This logic runs every time the component renders, which is fine as it depends on the state (entries, weightUnit)
-
-    // Filter out entries with invalid dates or values before preparing chart data
-    const validEntries = entries.filter(entry =>
-        entry.date instanceof Date && !isNaN(entry.date.getTime()) &&
-        typeof entry.weight === 'number' && !isNaN(entry.weight) &&
-        typeof entry.bodyFat === 'number' && !isNaN(entry.bodyFat)
-    );
-
-    // Sort valid entries by date
-    validEntries.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-
-    // Calculate min and max timestamps from valid entries for chart axis manually
-    let minTimestamp = Date.now();
-    let maxTimestamp = 0;
-
-    if (validEntries.length > 0) {
-        minTimestamp = validEntries[0].date.getTime();
-        maxTimestamp = validEntries[validEntries.length - 1].date.getTime();
-    } else {
-        minTimestamp = Date.now();
-        maxTimestamp = Date.now();
-    }
-
-    // Calculate Lean Body Mass from the most recent entry for target weight calculation
-    let targetWeight = null;
-    let lastPredictedTimestamp = maxTimestamp; // Initialize with the last historical timestamp
-
-
-    // --- Prepare data in Plotly format ---
-    // Plotly expects an array of trace objects
-    const plotlyData = [
-        {
-            // Weight trace
-            x: validEntries.map(entry => entry.date), // Use Date objects directly for Plotly time series
-            y: validEntries.map(entry => {
-                let weightValue = entry.weight;
-                // Apply conversion only if the entry's stored unit is different from the current state unit
-                if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                    if (weightUnit === 'lbs') {
-                         weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                    } else if (weightUnit === 'kg') {
-                         weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                    }
-                }
-                return parseFloat(weightValue.toFixed(1));
-            }),
-            mode: 'lines+markers', // Show both lines and markers
-            name: `Weight (${weightUnit})`,
-            line: { color: 'rgb(75, 192, 192)' },
-            marker: { size: 8 },
-            type: 'scatter', // Scatter plot type for lines and markers
-        },
-        {
-            // Fat Mass trace
-            x: validEntries.map(entry => entry.date),
-            y: validEntries.map(entry => {
-                const weight = entry.weight;
-                const bodyFatPercentage = entry.bodyFat;
-                let fatMass = (weight * (bodyFatPercentage / 100));
-
-                if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                    if (weightUnit === 'lbs') {
-                        fatMass = entry.weightUnit === 'kg' ? fatMass * 2.20462 : fatMass;
-                    } else if (weightUnit === 'kg') {
-                        fatMass = entry.weightUnit === 'lbs' ? fatMass * 0.453592 : fatMass;
-                    }
-                }
-                return parseFloat(fatMass.toFixed(1));
-            }),
-            mode: 'lines+markers',
-            name: `Fat Mass (${weightUnit})`,
-            line: { color: 'rgb(255, 99, 132)' }, // Reddish
-            marker: { size: 8 },
-            type: 'scatter',
-        },
-        {
-            // Lean Mass trace
-            x: validEntries.map(entry => entry.date),
-            y: validEntries.map(entry => {
-                const weight = entry.weight;
-                const bodyFatPercentage = entry.bodyFat;
-                let leanMass = (weight - (weight * (bodyFatPercentage / 100)));
-
-                if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                    if (weightUnit === 'lbs') {
-                        leanMass = entry.weightUnit === 'kg' ? leanMass * 2.20462 : leanMass;
-                    } else if (weightUnit === 'kg') {
-                        leanMass = entry.weightUnit === 'lbs' ? leanMass * 0.453592 : leanMass;
-                    }
-                }
-                return parseFloat(leanMass.toFixed(1));
-            }),
-            mode: 'lines+markers',
-            name: `Lean Mass (${weightUnit})`,
-            line: { color: 'rgb(53, 162, 235)' }, // Bluish
-            marker: { size: 8 },
-            type: 'scatter',
-        },
-        {
-            // Linear Regression Trend Line trace
-            x: calculateLinearRegression(
-                validEntries.map(entry => {
-                    let weightValue = entry.weight;
-                    // Convert weight to the *current display unit* before using in trend calculation
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                        } else if (entry.weightUnit === 'kg') {
-                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                        }
-                    }
-                    return { x: entry.date.getTime(), y: weightValue };
-                })
-            ).map(point => new Date(point.x)), // Convert timestamps back to Date objects for Plotly
-            y: calculateLinearRegression(
-                validEntries.map(entry => {
-                    let weightValue = entry.weight;
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                        } else if (entry.weightUnit === 'kg') {
-                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                        }
-                    }
-                    return { x: entry.date.getTime(), y: weightValue };
-                })
-            ).map(point => parseFloat(point.y.toFixed(1))), // Map y values and format
-            mode: 'lines',
-            name: `Weight Trend (Linear)`,
-            line: { color: 'rgb(0, 0, 0)', dash: 'dash' }, // Black dashed line
-            type: 'scatter',
-        },
-        // ES Prediction trace will be added conditionally below
-    ];
-
-    if (validEntries.length > 0) {
-        const lastEntry = validEntries[validEntries.length - 1];
-        const lastWeight = lastEntry.weight;
-        const lastBodyFatPercentage = lastEntry.bodyFat;
-
-        // Calculate Lean Body Mass based on the last entry's data
-        const leanBodyMass = lastWeight * (1 - (lastBodyFatPercentage / 100));
-
-        // Calculate the target weight for 5% body fat
-        // Target Weight = Lean Body Mass / (1 - Target Body Fat Percentage)
-        const targetBodyFatPercentage = 5; // 5%
-        targetWeight = leanBodyMass / (1 - (targetBodyFatPercentage / 100));
-
-        console.log(`Calculated Lean Body Mass (from last entry): ${leanBodyMass.toFixed(1)} ${weightUnit}`);
-        console.log(`Calculated Target Weight (for 5% Body Fat): ${targetWeight.toFixed(1)} ${weightUnit}`);
-
-        // Calculate Double Exponential Smoothing prediction points
-        const esPredictionPoints = calculateDoubleExponentialSmoothing(
-            validEntries.map(entry => {
-                let weightValue = entry.weight;
-                // Convert weight to the *current display unit* before using in prediction calculation
-                if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                    if (weightUnit === 'lbs') {
-                        weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                    } else if (entry.weightUnit === 'kg') {
-                        weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                    }
-                }
-                return { x: entry.date.getTime(), y: weightValue };
-            }),
-            alpha,
-            beta,
-            targetWeight // Pass the calculated target weight
+    // --- Prepare data for the chart (Memoized) ---
+    const memoizedChartData = useMemo(() => {
+        // Filter and sort valid entries inside useMemo
+        const validEntries = entries.filter(entry =>
+            entry.date instanceof Date && !isNaN(entry.date.getTime()) &&
+            typeof entry.weight === 'number' && !isNaN(entry.weight) &&
+            typeof entry.bodyFat === 'number' && !isNaN(entry.bodyFat)
         );
 
-        // Update lastPredictedTimestamp based on the last point in the prediction
-        if (esPredictionPoints.length > 0) {
-            lastPredictedTimestamp = esPredictionPoints[esPredictionPoints.length - 1].x;
+        validEntries.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+        // Calculate min and max timestamps
+        let minTimestamp = Date.now();
+        let maxTimestamp = 0;
+
+        if (validEntries.length > 0) {
+            minTimestamp = validEntries[0].date.getTime();
+            maxTimestamp = validEntries[validEntries.length - 1].date.getTime();
+        } else {
+            minTimestamp = Date.now();
+            maxTimestamp = Date.now();
         }
 
-        // Add the ES prediction trace to plotlyData
-        const esTrace = {
-            x: esPredictionPoints.map(point => new Date(point.x)), // Convert timestamps to Date objects for Plotly
-            y: esPredictionPoints.map(point => parseFloat(point.y.toFixed(1))), // Map y values and format
-            mode: 'lines',
-            name: `Weight Prediction (ES)`,
-            line: { color: 'rgb(255, 165, 0)', dash: 'dot' }, // Orange dotted line
-            type: 'scatter',
+        // Calculate Lean Body Mass and Target Weight
+        let targetWeight = null;
+        let lastPredictedTimestamp = maxTimestamp;
+
+        const plotlyData = [
+            // Weight trace
+            {
+                x: validEntries.map(entry => entry.date),
+                y: validEntries.map(entry => {
+                    let weightValue = entry.weight;
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                        } else if (weightUnit === 'kg') {
+                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                        }
+                    }
+                    return parseFloat(weightValue.toFixed(1));
+                }),
+                mode: 'lines+markers',
+                name: `Weight (${weightUnit})`,
+                line: { color: 'rgb(75, 192, 192)' },
+                marker: { size: 8 },
+                type: 'scatter',
+            },
+            // Fat Mass trace
+            {
+                x: validEntries.map(entry => entry.date),
+                y: validEntries.map(entry => {
+                    const weight = entry.weight;
+                    const bodyFatPercentage = entry.bodyFat;
+                    let fatMass = (weight * (bodyFatPercentage / 100));
+
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            fatMass = entry.weightUnit === 'kg' ? fatMass * 2.20462 : fatMass;
+                        } else if (weightUnit === 'kg') {
+                            fatMass = entry.weightUnit === 'lbs' ? fatMass * 0.453592 : fatMass;
+                        }
+                    }
+                    return parseFloat(fatMass.toFixed(1));
+                }),
+                mode: 'lines+markers',
+                name: `Fat Mass (${weightUnit})`,
+                line: { color: 'rgb(255, 99, 132)' },
+                marker: { size: 8 },
+                type: 'scatter',
+            },
+            // Lean Mass trace
+            {
+                x: validEntries.map(entry => entry.date),
+                y: validEntries.map(entry => {
+                    const weight = entry.weight;
+                    const bodyFatPercentage = entry.bodyFat;
+                    let leanMass = (weight - (weight * (bodyFatPercentage / 100)));
+
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            leanMass = entry.weightUnit === 'kg' ? leanMass * 2.20462 : leanMass;
+                        } else if (weightUnit === 'kg') {
+                            leanMass = entry.weightUnit === 'lbs' ? leanMass * 0.453592 : leanMass;
+                        }
+                    }
+                    return parseFloat(leanMass.toFixed(1));
+                }),
+                mode: 'lines+markers',
+                name: `Lean Mass (${weightUnit})`,
+                line: { color: 'rgb(53, 162, 235)' },
+                marker: { size: 8 },
+                type: 'scatter',
+            },
+            // Linear Regression Trend Line trace
+            {
+                x: calculateLinearRegression(
+                    validEntries.map(entry => {
+                        let weightValue = entry.weight;
+                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                            if (weightUnit === 'lbs') {
+                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                            } else if (weightUnit === 'kg') {
+                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                            }
+                        }
+                        return { x: entry.date.getTime(), y: weightValue };
+                    })
+                ).map(point => new Date(point.x)),
+                y: calculateLinearRegression(
+                    validEntries.map(entry => {
+                        let weightValue = entry.weight;
+                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                            if (weightUnit === 'lbs') {
+                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                            } else if (weightUnit === 'kg') {
+                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                            }
+                        }
+                        return { x: entry.date.getTime(), y: weightValue };
+                    })
+                ).map(point => parseFloat(point.y.toFixed(1))),
+                mode: 'lines',
+                name: `Weight Trend (Linear)`,
+                line: { color: 'rgb(0, 0, 0)', dash: 'dash' },
+                type: 'scatter',
+            },
+        ];
+
+        if (validEntries.length > 0) {
+            const lastEntry = validEntries[validEntries.length - 1];
+            const lastWeight = lastEntry.weight;
+            const lastBodyFatPercentage = lastEntry.bodyFat;
+
+            const leanBodyMass = lastWeight * (1 - (lastBodyFatPercentage / 100));
+            const targetBodyFatPercentage = 5;
+            targetWeight = leanBodyMass / (1 - (targetBodyFatPercentage / 100));
+
+            const esPredictionPoints = calculateDoubleExponentialSmoothing(
+                validEntries.map(entry => {
+                    let weightValue = entry.weight;
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                        } else if (weightUnit === 'kg') {
+                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                        }
+                    }
+                    return { x: entry.date.getTime(), y: weightValue };
+                }),
+                alpha,
+                beta,
+                targetWeight
+            );
+
+            if (esPredictionPoints.length > 0) {
+                lastPredictedTimestamp = esPredictionPoints[esPredictionPoints.length - 1].x;
+            }
+
+            const esTrace = {
+                x: esPredictionPoints.map(point => new Date(point.x)),
+                y: esPredictionPoints.map(point => parseFloat(point.y.toFixed(1))),
+                mode: 'lines',
+                name: `Weight Prediction (ES)`,
+                line: { color: 'rgb(255, 165, 0)', dash: 'dot' },
+                type: 'scatter',
+            };
+            plotlyData.push(esTrace);
+        }
+
+        return { plotlyData, minTimestamp, lastPredictedTimestamp };
+
+    }, [entries, weightUnit, alpha, beta]); // Dependencies for memoization
+
+    const { plotlyData, minTimestamp, lastPredictedTimestamp } = memoizedChartData;
+
+
+    const memoizedLayout = useMemo(() => {
+        return {
+            title: `Body Metrics Progress and Prediction (${weightUnit})`,
+            xaxis: {
+                title: 'Date',
+                type: 'date',
+                range: [new Date(minTimestamp), new Date(lastPredictedTimestamp)],
+                rangeslider: { visible: true },
+            },
+            yaxis: {
+                title: `Measurement (${weightUnit})`,
+            },
+            hovermode: 'closest',
+            dragmode: 'pan',
+            margin: {
+                l: 50,
+                r: 50,
+                b: 80,
+                t: 50,
+                pad: 4
+            },
+            autosize: true,
         };
-        plotlyData.push(esTrace);
-
-    } else {
-        console.log('Not enough data to calculate Lean Body Mass and Target Weight for prediction.');
-    }
+    }, [weightUnit, minTimestamp, lastPredictedTimestamp]); // Dependencies for layout memoization  
 
 
-    // --- Plotly Layout (Options) ---
-    const layout = {
-        title: `Body Metrics Progress and Prediction (${weightUnit})`,
-        xaxis: {
-            title: 'Date',
-            type: 'date', // Set x-axis type to 'date'
-             range: [new Date(minTimestamp), new Date(lastPredictedTimestamp)], // Set initial range to include prediction end
-             rangeslider: { visible: true }, // Add a range slider for easier navigation
-        },
-        yaxis: {
-            title: `Measurement (${weightUnit})`,
-        },
-        hovermode: 'closest', // Show tooltip for the closest point
-        // Add dragmode for pan/zoom
-        dragmode: 'pan', // 'zoom' or 'pan'
-        // Optional: Add a range slider or selector for easier navigation
-        // shapes, annotations, and other layout customizations can go here
-        margin: {
-            l: 50, // left margin
-            r: 50, // right margin
-            b: 80, // bottom margin (increased for range slider)
-            t: 50, // top margin
-            pad: 4 // padding
-        },
-        // Ensure responsiveness
-        autosize: true,
-    };
+    
+
 
 
     return (
@@ -990,9 +786,11 @@ const BodyMetricsDashboard = () => {
                                 step="0.1"
                             />
                         </div>
+                        
                         {/* Submit button for the edit form */}
                          <button type="submit" /* Optional: Add loading state here */>Save Changes</button>
                     </form>
+                    
                     {/* The Cancel button to exit edit mode */}
                     <button onClick={() => setIsEditing(false)}>Cancel</button>
                 </div>
@@ -1083,12 +881,12 @@ const BodyMetricsDashboard = () => {
                     {/* Show graph only if not loading/error and entries exist */}
                     {!fetchLoading && !fetchError && entries.length > 0 && (
                         <div style={{ width: '100%', maxWidth: '1280px', margin: '20px auto', height: '720px' }}>
-                             {/* Render the Plotly chart */}
+                            {/* Render the Plotly chart using memoized data and layout */}
                             <Plot
-                                data={plotlyData} // Pass the Plotly-formatted data
-                                layout={layout} // Pass the Plotly layout
-                                style={{ width: '100%', height: '100%' }} // Style for the container div
-                                useResizeHandler={true} // Enable responsiveness
+                                data={plotlyData}
+                                layout={memoizedLayout}
+                                style={{ width: '100%', height: '100%' }}
+                                useResizeHandler={true}
                             />
                         </div>
                     )}
