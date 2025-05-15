@@ -1,9 +1,20 @@
 // src/hooks/useCsvImport.js
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Papa from 'papaparse';
 // Import the service function needed for saving imported data
-import { addBodyMetricsEntry } from '../services/bodyMetricsService';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db } from '../firebase';
+// import { addBodyMetricsEntry } from '../services/bodyMetricsService';
+
+// Helper function to get today's date inYYYY-MM-DD format (useful for default values if needed)
+const getTodaysDate = () => {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
 
 /**
  * Custom React hook for handling CSV import functionality.
@@ -13,38 +24,198 @@ import { addBodyMetricsEntry } from '../services/bodyMetricsService';
  * @param {function} onImportSuccess - Callback function to run after a successful import (e.g., to re-fetch entries).
  * @returns {Object} An object containing state variables and handler functions for the component to use.
  */
-const useCsvImport = (userId, onImportSuccess) => {
+const useCsvImport = (userId, onImportComplete) => {
     // State for CSV Import process
     const [selectedFile, setSelectedFile] = useState(null);
-    const [csvContent, setCsvContent] = useState(null); // Stores the raw text content
-    const [parsedCsvData, setParsedCsvData] = useState(null); // Stores the array of row objects from PapaParse
-
-    // State for CSV Column Mapping
-    const [csvHeaders, setCsvHeaders] = useState([]); // Stores the headers extracted from the CSV file
-    const [columnMapping, setColumnMapping] = useState({ // Stores the user's selections for column mapping
+    const [parsedCsvData, setParsedCsvData] = useState(null);
+    const [csvHeaders, setCsvHeaders] = useState([]);
+    const [columnMapping, setColumnMapping] = useState({
         date: '',
         weight: '',
         bodyFat: '',
-        unit: 'lbs', // Default unit for imported data, user can change
+        unit: 'lbs', // Default unit for imported data
     });
-
-    // States for CSV Import process feedback
     const [importError, setImportError] = useState('');
     const [importMessage, setImportMessage] = useState('');
-    const [isParsing, setIsParsing] = useState(false); // State to indicate if parsing is in progress
+    const [isParsing, setIsParsing] = useState(false);
+    const [isImporting, setIsImporting] = useState(false); // State for the Firestore saving process
 
-    // Helper function to clear all import-related states and reset the UI
-    const clearImportState = () => {
-        setSelectedFile(null);
-        setCsvContent(null);
-        setParsedCsvData(null);
-        setCsvHeaders([]);
-        setColumnMapping({ date: '', weight: '', bodyFat: '', unit: 'lbs' });
-        setImportError('');
-        setImportMessage('');
-        setIsParsing(false);
+    const onImportCompleteRef = useRef(null);
+
+    // Use a useRef to store the onImportComplete callback, initialized with null
+    // Initialize with null to avoid ReferenceError if onImportComplete is undefined initially
+    useEffect(() => {
+        onImportCompleteRef.current = onImportComplete;
+    }, [onImportComplete]);
+
+    // Step 1: Handle file selection and initiate parsing
+    const handleFileSelect = (event) => {
+        const file = event.target.files[0];
+        if (file) {
+            setSelectedFile(file);
+            setImportError(''); // Clear previous errors
+            setImportMessage('Parsing file...');
+            setIsParsing(true); // Start parsing loading state
+
+            // Use PapaParse to parse the CSV file
+            Papa.parse(file, {
+                header: true, // Treat the first row as headers
+                skipEmptyLines: true,
+                complete: (results) => {
+                    console.log('PapaParse results:', results);
+                    if (results.errors.length > 0) {
+                        console.error('PapaParse errors:', results.errors);
+                        setImportError(`Error parsing CSV: ${results.errors[0].message}`);
+                        setImportMessage('');
+                        setParsedCsvData(null);
+                        setCsvHeaders([]);
+                    } else if (results.data.length === 0) {
+                        setImportError('CSV file is empty or contains no data rows after headers.');
+                        setImportMessage('');
+                        setParsedCsvData(null);
+                        setCsvHeaders([]);
+                    }
+                    else {
+                        // Filter out rows that are just headers repeated in the data
+                        const filteredData = results.data.filter(row =>
+                            Object.values(row).some(value => value !== results.meta.fields[0]) // Check if at least one value is not the first header
+                        );
+
+                        setParsedCsvData(filteredData);
+                        setCsvHeaders(results.meta.fields || []); // Get headers
+                        console.log('CSV Parsed successfully. Number of rows:', filteredData.length, 'Headers:', results.meta.fields);
+                        setImportMessage('CSV parsed successfully. Please map columns.');
+                        setImportError(''); // Clear any previous parsing errors
+                    }
+                    setIsParsing(false); // End parsing loading state
+                },
+                error: (error) => {
+                    console.error('PapaParse error:', error);
+                    setImportError(`Error reading file: ${error.message}`);
+                    setImportMessage('');
+                    setIsParsing(false);
+                }
+            });
+        } else {
+            clearImportState(); // Clear state if no file is selected
+        }
     };
 
+    // Step 2: Confirm column mapping (This function is called by the component)
+    const handleConfirmMapping = () => {
+        // Basic check if required columns are mapped
+        if (columnMapping.date && columnMapping.weight && columnMapping.bodyFat) {
+            setImportMessage('Column mapping confirmed. Ready to import data.');
+            setImportError('');
+            // The component will now render the "Ready to Import" section
+        } else {
+            setImportError('Please map all required columns (Date, Weight, Body Fat).');
+            setImportMessage('');
+        }
+    };
+
+    // Step 3: Handle the actual data import to Firestore
+    const handleImportCsv = async () => {
+        if (!userId) {
+            setImportError('User not logged in. Cannot import data.');
+            return;
+        }
+        if (!parsedCsvData || parsedCsvData.length === 0) {
+            setImportError('No data to import.');
+            return;
+        }
+         if (!columnMapping.date || !columnMapping.weight || !columnMapping.bodyFat) {
+            setImportError('Column mapping is incomplete.');
+            return;
+         }
+
+        setImportError('');
+        setImportMessage('Importing data...');
+        setIsImporting(true); // Start importing loading state
+
+        // Corrected Firestore collection path to 'bodyMetricsEntries'
+        const metricsCollectionRef = collection(db, `users/${userId}/bodyMetricsEntries`);
+        let successfulImports = 0;
+        let failedImports = 0;
+
+        for (const row of parsedCsvData) {
+            const dateString = row[columnMapping.date];
+            const weightString = row[columnMapping.weight];
+            const bodyFatString = row[columnMapping.bodyFat];
+
+            // --- Robust Date Parsing (Handling MM/DD/YYYY andYYYY-MM-DD) ---
+            let entryDate = new Date('Invalid Date'); // Initialize as invalid
+
+            if (dateString) {
+                // Attempt to parse as MM/DD/YYYY
+                const dateParts = dateString.split('/').map(Number);
+                if (dateParts.length === 3 && !isNaN(dateParts[0]) && !isNaN(dateParts[1]) && !isNaN(dateParts[2])) {
+                // Note: Month is 0-indexed in JS Date, so subtract 1 from the month part
+                entryDate = new Date(dateParts[2], dateParts[0] - 1, dateParts[1]);
+                } else {
+                // If MM/DD/YYYY parsing failed, attemptYYYY-MM-DD
+                    const yearMonthDayParts = dateString.split('-').map(Number);
+                    if (yearMonthDayParts.length === 3 && !isNaN(yearMonthDayParts[0]) && !isNaN(yearMonthDayParts[1]) && !isNaN(yearMonthDayParts[2])) {
+                        entryDate = new Date(yearMonthDayParts[0], yearMonthDayParts[1] - 1, yearMonthDayParts[2]);
+                    }
+                }
+            }
+            // --- End Robust Date Parsing ---
+
+
+            const weight = parseFloat(weightString);
+            const bodyFat = parseFloat(bodyFatString);
+
+            // Validate parsed data
+            if (isNaN(entryDate.getTime()) || isNaN(weight) || isNaN(bodyFat) || bodyFat < 0 || bodyFat > 100) {
+                console.warn('CSV Import: Skipping row due to invalid data:', row);
+                failedImports++;
+                continue; // Skip this row if data is invalid
+            }
+
+            try {
+                const entryData = {
+                    date: entryDate, // Save the correctly parsed Date object
+                    weight: weight,
+                    bodyFat: bodyFat,
+                    weightUnit: columnMapping.unit, // Use the unit specified in mapping
+                    createdAt: serverTimestamp(), // Add server timestamp
+                };
+                await addDoc(metricsCollectionRef, entryData);
+                successfulImports++;
+            } catch (error) {
+                console.error('CSV Import: Error adding document for row:', row, error);
+                failedImports++;
+                // Continue with the next row even if one fails
+            }
+        }
+
+        setIsImporting(false); // End importing loading state
+
+        if (successfulImports > 0) {
+            setImportMessage(`Import complete: ${successfulImports} entries added, ${failedImports} failed.`);
+            setImportError(failedImports > 0 ? `Some entries failed to import. Check console for details.` : '');
+
+            // Call the callback function using the ref
+            // Check if the ref's current value is a function before calling
+            if (typeof onImportCompleteRef.current === 'function') {
+                onImportCompleteRef.current();
+            } else {
+                console.warn("CSV Import: onImportComplete callback was not a function when trying to call.");
+            }
+
+
+            // Optional: Clear the import state after a delay
+            setTimeout(clearImportState, 5000); // Clear after 5 seconds
+        } else {
+            setImportError(`Import failed: No entries were added. ${failedImports} rows had invalid data.`);
+            setImportMessage('');
+            // Do not clear state automatically on complete failure
+        }
+    };
+
+
+    /*
     // Function to parse the CSV content using PapaParse
     const parseCsv = (content) => {
         // Clear previous parsed data, headers, etc.
@@ -93,196 +264,20 @@ const useCsvImport = (userId, onImportSuccess) => {
             }
         });
     };
+    */
 
-
-    // Function to handle file selection and read its content
-    const handleFileSelect = (event) => {
-        const file = event.target.files[0];
-
-        // Clear previous states related to import when a new file is selected
-        clearImportState(); // Use the helper to reset all states
-
-
-        if (file && file.type === 'text/csv') {
-            setSelectedFile(file); // Store the file object
-
-            const reader = new FileReader(); // Create a FileReader instance
-
-            // Define what happens when the file is successfully read
-            reader.onload = (e) => {
-                const content = e.target.result; // Get the file content (as a string)
-                setCsvContent(content); // Store raw content
-
-                setIsParsing(true); // Set parsing loading state
-                parseCsv(content); // Call the parsing function with the content
-            };
-
-            // Define what happens if there's an error reading the file
-            reader.onerror = (error) => {
-                console.error('Error reading file:', error);
-                setImportError('Failed to read file.');
-                setSelectedFile(null);
-                setCsvContent(null);
-                setIsParsing(false);
-            };
-
-            // Start reading the file as text
-            reader.readAsText(file);
-
-        } else {
-            console.log('No file selected or invalid file type.');
-            setImportError('Please select a valid CSV file.');
-            setSelectedFile(null);
-            setCsvContent(null);
-            setIsParsing(false);
-        }
-        // Optional: Reset the file input value so the same file can be selected again after clearing
-        event.target.value = '';
+    // Function to clear all import-related state
+    const clearImportState = () => {
+        setSelectedFile(null);
+        setParsedCsvData(null);
+        setCsvHeaders([]);
+        setColumnMapping({ date: '', weight: '', bodyFat: '', unit: 'lbs' });
+        setImportError('');
+        setImportMessage('');
+        setIsParsing(false);
+        setIsImporting(false);
     };
 
-
-    // Function to handle confirming column mapping (placeholder - can add validation/preview here)
-    const handleConfirmMapping = () => {
-        // Check if required fields are selected
-        if (!columnMapping.date || !columnMapping.weight || !columnMapping.bodyFat) {
-            setImportError('Please select columns for Date, Weight, and Body Fat.');
-            return;
-        }
-        console.log('Mapping confirmed:', columnMapping);
-        setImportMessage('Mapping confirmed. Ready to import.'); // Update message
-        setImportError(''); // Clear errors
-        // At this point, the UI changes automatically based on columnMapping state being valid
-    };
-
-
-    // Function to handle the final Import Mapped Data button click (saving logic goes here)
-    const handleImportCsv = async () => {
-        // Basic check if data is parsed and mapping is complete
-        if (!parsedCsvData || !columnMapping.date || !columnMapping.weight || !columnMapping.bodyFat) {
-            setImportError('Cannot import: data not parsed or columns not fully mapped.');
-            return;
-        }
-        if (!userId) {
-            setImportError('Cannot import: User not logged in.');
-            console.error('handleImportCsv: User ID missing.');
-            return;
-        }
-
-        console.log('Attempting to import data with mapping:', columnMapping);
-        setImportMessage('Importing data...'); // Update message
-        setImportError(''); // Clear errors
-        // Optional: Add loading state for the import button (e.g., setIsImporting(true))
-
-        const entriesToSave = [];
-        const failedEntries = []; // To track rows that couldn't be saved
-
-        // Iterate through parsed data and prepare entries
-        for (const row of parsedCsvData) {
-            // Use the column mapping to get the correct value from the row
-            // Ensure the column name exists in the row object before accessing
-            const dateValue = row[columnMapping.date];
-            const weightValue = row[columnMapping.weight];
-            const bodyFatValue = row[columnMapping.bodyFat];
-            const unitValue = columnMapping.unit; // Get unit from mapping state
-
-            // --- Data Validation and Preparation ---
-            let parsedDate = null;
-            if (dateValue) {
-                // Attempt to parse the date string - PapaParse reads everything as strings
-                // Common formats areYYYY-MM-DD, MM/DD/YYYY, etc. You might need more robust parsing here.
-                // For simplicity, let's try parsing directly or using a library like date-fns parse
-                // Example basic parsing forYYYY-MM-DD or MM/DD/YYYY
-                try {
-                    // Try parsing asYYYY-MM-DD first
-                    const [y, m, d] = dateValue.split('-').map(Number);
-                    let dateObj = new Date(y, m - 1, d); // Month is 0-indexed
-                    if (!isNaN(dateObj.getTime())) {
-                        parsedDate = dateObj;
-                    } else {
-                        // Try parsing as MM/DD/YYYY
-                        const [month, day, year] = dateValue.split('/').map(Number);
-                        dateObj = new Date(year, month - 1, day);
-                        if (!isNaN(dateObj.getTime())) {
-                            parsedDate = dateObj;
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Could not parse date for row:', row, 'Error:', e);
-                    // Date parsing failed
-                }
-            }
-
-            const parsedWeight = parseFloat(weightValue);
-            const parsedBodyFat = parseFloat(bodyFatValue);
-
-            // Validate if parsed values are valid numbers and date is valid
-            if (parsedDate && !isNaN(parsedWeight) && !isNaN(parsedBodyFat) && parsedBodyFat >= 0 && parsedBodyFat <= 100) {
-                // Data is valid, add to entries to save
-                entriesToSave.push({
-                    date: parsedDate,
-                    weight: parsedWeight,
-                    bodyFat: parsedBodyFat,
-                    weightUnit: unitValue, // Use the unit from the mapping state
-                });
-            } else {
-                // Data is invalid, log it and add to failed list
-                console.warn('Skipping invalid row during import:', row, 'Parsed:', { date: parsedDate, weight: parsedWeight, bodyFat: parsedBodyFat });
-                failedEntries.push(row);
-            }
-            // --- End Data Validation and Preparation ---
-        }
-
-        if (entriesToSave.length === 0) {
-            setImportError('No valid entries found to import after processing.');
-            setImportMessage('');
-            console.log('Import failed: No valid entries found.');
-            // setIsImporting(false);
-            return;
-        }
-
-        console.log(`Attempting to save ${entriesToSave.length} valid entries...`);
-
-        // --- Save Entries to Firestore using the service ---
-        try {
-            // TODO: Implement batching for large imports in the service
-            for (const entryData of entriesToSave) {
-                // Call the service function to add each entry
-                await addBodyMetricsEntry(userId, entryData);
-            }
-
-            const successCount = entriesToSave.length;
-            const failCount = failedEntries.length;
-            const totalCount = parsedCsvData.length;
-
-            let finalMessage = `Import complete! Successfully imported ${successCount} out of ${totalCount} rows.`;
-            if (failCount > 0) {
-                finalMessage += ` ${failCount} rows were skipped due to validation errors.`;
-                console.warn('Skipped rows during import:', failedEntries);
-                setImportError(`Validation errors occurred for ${failCount} rows. Check console for details.`);
-            } else {
-                setImportError(''); // Clear any previous error if all were successful
-            }
-
-            setImportMessage(finalMessage);
-            console.log('Import successful.');
-
-            // Call the success callback provided by the component
-            if (onImportSuccess && typeof onImportSuccess === 'function') {
-                onImportSuccess();
-            }
-
-            // Optional: Clear import state after successful import
-            // setTimeout(() => { clearImportState(); }, 3000); // Clear after 3 seconds
-
-        } catch (error) {
-            console.error('Error saving imported entries to Firestore:', error);
-            setImportError(error.message); // Use the error message from the service
-            setImportMessage(''); // Clear success message on error
-        }
-        // Optional: setIsImporting(false); // Reset loading state
-    };
-
-    // Return state variables and handlers needed by the component
     return {
         selectedFile,
         parsedCsvData,
@@ -291,7 +286,8 @@ const useCsvImport = (userId, onImportSuccess) => {
         importError,
         importMessage,
         isParsing,
-        setColumnMapping,
+        isImporting, // Expose importing loading state
+        setColumnMapping, // Expose setter for the component to update mapping
         handleFileSelect,
         handleConfirmMapping,
         handleImportCsv,
