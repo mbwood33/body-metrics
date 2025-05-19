@@ -8,13 +8,13 @@ import useUserProfile from '../hooks/useUserProfile.js';
 // Import calculation functions from utils
 import {
     calculateLinearRegression,
-    calculateDoubleExponentialSmoothing,
     calculateBmr,
-    calculateTdee
+    calculateTdee,
+    predictWeightCalorieModel,
+    calculateAge
 } from '../utils/calculations.js';
 
 import Plot from 'react-plotly.js'; // Import Plotly React component
-import { parse } from 'papaparse';
 
 // Helper function to get today's date inYYYY-MM-DD format
 const getTodaysDate = () => {
@@ -25,25 +25,6 @@ const getTodaysDate = () => {
     return `${year}-${month}-${day}`;
 }
 
-// Helper function to calculate age from date of birth
-const calculateAge = (dateOfBirth) => {
-    if (!dateOfBirth || !(dateOfBirth instanceof Date) || isNaN(dateOfBirth.getTime())) {
-        return NaN;
-    }
-
-    const today = new Date();
-
-    let age = today.getFullYear() - dateOfBirth.getFullYear();
-    const monthDiff = today.getMonth() - dateOfBirth.getMonth();
-
-    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dateOfBirth.getDate())) {
-        age--;
-    }
-
-    return age;
-};
-
-
 const BodyMetricsDashboard = () => {
     // Refs for the new entry form
     const dateRef = useRef();
@@ -53,10 +34,9 @@ const BodyMetricsDashboard = () => {
     // State for weight unit (remains in component as it's UI state for the form/chart)
     const [weightUnit, setWeightUnit] = useState('lbs');
     
-    // State for Double Exponential Smoothing Prediction settings
-    const [alpha, setAlpha] = useState(0.5); // Default alpha value for level smoothing
-    const [beta, setBeta] = useState(0.3); // Default beta value for trend smoothing
-    
+    // State for prediction days
+    const [predictionDays, setPredictionDays] = useState(90);  // Default to 90 days
+
     // Use the custom hook for body metrics data management
     const {
         entries,
@@ -86,7 +66,6 @@ const BodyMetricsDashboard = () => {
 
     // --- Use the custom hook for CSV import ---
     // Pass the current user's ID and the handleFetchEntries callback to the hook
-    
     const {
         selectedFile,
         parsedCsvData,
@@ -154,15 +133,6 @@ const BodyMetricsDashboard = () => {
     const handleSaveProfile = (e) => {
         e.preventDefault();
 
-        // --- Debugging Logs for Target Rate ---
-        console.log('Saving profile data:', localProfileData); // Log the entire state
-        console.log('Target Rate value from state:', localProfileData.targetRate); // Log the specific value
-        console.log('Type of Target Rate value from state:', typeof localProfileData.targetRate); // Log the type
-        const parsedTargetRate = parseFloat(localProfileData.targetRate);
-        console.log('Parsed Target Rate:', parsedTargetRate); // Log the parsed value
-        console.log('Is Parsed Target Rate NaN?', isNaN(parsedTargetRate)); // Check if it's NaN
-        // --- End Debugging Logs ---
-
         // Basic validation for profile data
         if (!localProfileData.sex || !localProfileData.dateOfBirth || !localProfileData.height || !localProfileData.activityLevel) {
             setProfileError('Please fill in all profile fields.');
@@ -211,16 +181,18 @@ const BodyMetricsDashboard = () => {
         saveProfile(profileDataToSave);
     };
 
-    // --- Calculate BMR, TDEE, and Target Caloric Intake using useMemo ---
-    const { bmr, tdee, targetCaloricIntake } = useMemo(() => {
+    // --- Calculate BMR, TDEE, Target Caloric Intake, and Prediction using useMemo ---
+    const { bmr, tdee, targetCaloricIntake, caloriePredictionPoints, milestonePoints } = useMemo(() => {
         let calculatedBmr = NaN;
         let calculatedTdee = NaN;
         let calculatedTargetCaloricIntake = NaN;
+        let predictedPoints = [];
+        const foundMilestonePoints = [];
 
         // Find the most recent weight entry
         const latestEntry = entries.length > 0 ? entries[entries.length - 1] : null;
 
-        // Check if we have both user profile data and a recent weight entry
+        // Ensure we have valid data points for calculation
         if (userProfile && latestEntry) {
             const age = calculateAge(userProfile.dateOfBirth);
             const sex = userProfile.sex;
@@ -235,51 +207,160 @@ const BodyMetricsDashboard = () => {
                 typeof heightInInches === 'number' && !isNaN(heightInInches) && heightInInches > 0 &&
                 typeof weight === 'number' && !isNaN(weight) && weight > 0 &&
                 typeof weightUnitEntry === 'string' && weightUnitEntry !== '') {
+                
+                    // Convert height from inches to centimeters (1 inch = 2.54 cm)
+                    const heightInCm = heightInInches * 2.54;
 
-                // Convert height from inches to centimeters (1 inch = 2.54 cm)
-                const heightInCm = heightInInches * 2.54;
+                    // Convert weight to kilograms if it's in lbs (1 lbs = 0.453592 kg)
+                    const weightInKg = weightUnitEntry === 'lbs' ? weight * 0.453592 : weight;
 
-                // Convert weight to kilograms if it's in lbs (1 lbs = 0.453592 kg)
-                const weightInKg = weightUnitEntry === 'lbs' ? weight * 0.453592 : weight;
+                    // Calculate BMR
+                    calculatedBmr = calculateBmr({
+                        sex: sex,
+                        weight: weightInKg,
+                        height: heightInCm,
+                        age: age
+                    });
 
-                // Calculate BMR
-                calculatedBmr = calculateBmr({
-                    sex: sex,
-                    weight: weightInKg,
-                    height: heightInCm,
-                    age: age
-                });
+                    // Calculate TDEE if BMR is valid
+                    if (!isNaN(calculatedBmr)) {
+                        calculatedTdee = calculateTdee(calculatedBmr, activityLevel);
 
-                // Calculate TDEE if BMR is valid
-                if (!isNaN(calculatedBmr)) {
-                    calculatedTdee = calculateTdee(calculatedBmr, activityLevel);
+                        // Calculate Target Caloric Intake based on TDEE and weight goal
+                        if (!isNaN(calculatedTdee) && userProfile.weightGoalType !== 'maintain' &&
+                            typeof userProfile.targetRate === 'number' && !isNaN(userProfile.targetRate) && userProfile.targetRate > 0) {
+                                
+                                // Calorie deficit/surplus needed per week to lose/gain 1 lb in approx 3500 calories.
+                                // Calorie deficit/surplus per day = (Target Rate in lbs/week * 3500 calories/lb) / 7 days/week
+                                let targetRateInLbsPerWeek = userProfile.targetRate;
+                                // Assuming userProfile.weightUnit stores the unit the targetWeight/Rate are in
+                                if (userProfile.weightUnit === 'kg') {
+                                    targetRateInLbsPerWeek = userProfile.targetRate * 2.20462;  // Convert kg/week to lbs/week
+                                }
 
-                    // Calculate Target Caloric Intake based on TDEE and weight goal
-                    if (!isNaN(calculatedTdee) && userProfile.weightGoalType !== 'maintain' &&
-                        typeof userProfile.targetRate === 'number' && !isNaN(userProfile.targetRate) && userProfile.targetRate > 0) {
+                                const dailyCalorieAdjustment = (targetRateInLbsPerWeek * 3500) / 7;
 
-                        // Calorie deficit/surplus needed per week to lose/gain 1 lb is approx 3500 calories.
-                        // Calorie deficit/surplus per day = (Target Rate in lbs/week * 3500 calories/lb) / 7 days/week
-                        const dailyCalorieAdjustment = (userProfile.targetRate * 3500) / 7;
+                                if (userProfile.weightGoalType === 'lose') {
+                                    calculatedTargetCaloricIntake = calculatedTdee - dailyCalorieAdjustment;
+                                } else if (userProfile.weightGoalType === 'gain') {
+                                    calculatedTargetCaloricIntake = calculatedTdee + dailyCalorieAdjustment;
+                                }
 
-                        if (userProfile.weightGoalType === 'lose') {
-                            calculatedTargetCaloricIntake = calculatedTdee - dailyCalorieAdjustment;
-                        } else if (userProfile.weightGoalType === 'gain') {
-                            calculatedTargetCaloricIntake = calculatedTdee + dailyCalorieAdjustment;
+                                // Ensure caloric intake is not negative
+                                if (calculatedTargetCaloricIntake < 0) {
+                                    calculatedTargetCaloricIntake = 0;
+                                }
+                                // TODO: Add warning message if caloric intake gets too low
+                        } else if (userProfile.weightGoalType === 'maintain' && !isNaN(calculatedTdee)) {
+                            // If goal is maintain, target intake is TDEE
+                            calculatedTargetCaloricIntake = calculatedTdee;
                         }
 
-                        // Ensure caloric intake is not negative
-                        if (calculatedTargetCaloricIntake < 0) {
-                            calculatedTargetCaloricIntake = 0;
+                        // --- Calculate Calorie Model Prediction ---
+                        if (!isNaN(calculatedTargetCaloricIntake) && latestEntry && userProfile &&
+                            typeof userProfile.sex === 'string' && userProfile.sex !== '' &&
+                            userProfile.dateOfBirth instanceof Date && !isNaN(userProfile.dateOfBirth.getTime()) &&
+                            typeof userProfile.height === 'number' && !isNaN(userProfile.height) && userProfile.height > 0 &&
+                            typeof userProfile.activityLevel === 'string' && userProfile.activityLevel !== '' &&
+                            typeof userProfile.weightGoalType === 'string' && userProfile.weightGoalType !== '' &&
+                            (userProfile.weightGoalType === 'maintain' || (typeof userProfile.targetWeight === 'number' && !isNaN(userProfile.targetWeight) && typeof userProfile.targetRate === 'number' && !isNaN(userProfile.targetRate) && userProfile.targetRate > 0))
+                            ) {
+                            // Pass the last entry, calculated target intake, and user profile to the new model
+                            predictedPoints = predictWeightCalorieModel({
+                                lastEntry: latestEntry, // Pass the full entry object
+                                targetCaloricIntake: calculatedTargetCaloricIntake,
+                                userProfile: userProfile,
+                                predictionDays: predictionDays
+                            });
+
+                            // --- Find Milestone Points on the Prediction ---
+                            const milestones = userProfile.weightGoalType === 'lose'
+                                ? [30, 25, 20, 15, 10, 5]   // Body fat % milestones for loss
+                                : [];   // Add gain milestones later if needed (e.g., target weight reached)
+                                // TODO: Add milestones for weight goal gain
+                                // TODO: Calculate body fat % milestones for weight loss based on current body fat percentage
+                            
+                            let lastPredictedBodyFat = latestEntry.bodyFat; // Start with last historical BF%
+
+                            // Iterate through predicted points to find milestones
+                            for (const point of predictedPoints) {
+                                // Check for Body Fat % milestones (only if losing and milestones defined)
+                                if (userProfile.weightGoalType === 'lose' && milestones.length > 0) {
+                                    for (const milestoneBF of milestones) {
+                                        // Check if the prediction crossed this milestone since the last point
+                                        // We need to check if the current point's BF is below the milestone
+                                        // AND the previous point's BF was above or equal to the milestone
+                                        if (point.bodyFat <= milestoneBF && lastPredictedBodyFat > milestoneBF) {
+                                            foundMilestonePoints.push({
+                                                x: point.x, // Timestamp of the predicted point
+                                                y: point.y, // Predicted weight at this point
+                                                bodyFat: point.bodyFat, // Predicted body fat at this point
+                                                label: `${milestoneBF}% BF` // Label for the milestone
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Check for Target Weight milestone
+                                if (userProfile.weightGoalType !== 'maintain' && userProfile.targetWeight !== null && typeof userProfile.targetWeight === 'number' && !isNaN(userProfile.targetWeight)) {
+                                    // Need to convert target weight to the unit of the predicted points (which is the lastEntry's unit)
+                                    let targetWeightInPredictionUnit = userProfile.targetWeight;
+                                    // Assuming userProfile.weightUnit stores the unit the targetWeight is in
+                                    if (userProfile.weightUnit && userProfile.weightUnit !== latestEntry.weightUnit) {
+                                        if (latestEntry.weightUnit === 'lbs') {
+                                            targetWeightInPredictionUnit = userProfile.weightUnit === 'kg' ? targetWeightInPredictionUnit * 2.20462 : targetWeightInPredictionUnit;
+                                        } else if (latestEntry.weightUnit === 'kg') {
+                                            targetWeightInPredictionUnit = userProfile.weightUnit === 'lbs' ? targetWeightInPredictionUnit * 0.453592 : targetWeightInPredictionUnit;
+                                        }
+                                    }
+
+                                    // Check if the prediction crossed the target weight
+                                    // Get weight from previous predicted point or last entry
+                                    const lastPredictedWeight = predictedPoints.length > 1 && predictedPoints[predictedPoints.length - 2] ? predictedPoints[predictedPoints.length - 2].y : latestEntry.weight;
+
+                                    // Check if current weight is below target AND previous was above (for loss)
+                                    if (userProfile.weightGoalType === 'lose' && point.y <= targetWeightInPredictionUnit && lastPredictedWeight  > targetWeightInPredictionUnit) {
+                                        // Ensure we only add the first time it crosses the target
+                                        if (!foundMilestonePoints.some(m => m.label.startsWith('Target Weight'))) {
+                                            foundMilestonePoints.push({
+                                                x: point.x,
+                                                y: point.y,
+                                                bodyFat: point.bodyFat,
+                                                label: `Target Weight (${userProfile.targetWeight.toFixed(1)} ${userProfile.weightUnit || ''})` // Use the user's entered target and unit
+                                            });
+                                        }
+                                    }
+                                    // Check if current weight is above target AND previous was below (for gain)
+                                    if (userProfile.weightGoalType === 'gain' && point.y >= targetWeightInPredictionUnit && lastPredictedWeight < targetWeightInPredictionUnit) {
+                                        // Ensure we only add the first time it crosses the target
+                                        if (!foundMilestonePoints.some(m => m.label.startsWith('Target Weight'))) {
+                                            foundMilestonePoints.push({
+                                                x: point.x,
+                                                y: point.y,
+                                                bodyFat: point.bodyFat,
+                                                label: `Target Weight (${userProfile.targetWeight.toFixed(1)} ${userProfile.weightUnit || ''})` // Use the user's entered target and unit
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Update last predicted body fat for the next iteration's check
+                                lastPredictedBodyFat = point.bodyFat;
+                            }
+
+                            // Sort milestone points by date
+                            foundMilestonePoints.sort((a, b) => a.x - b.x);
                         }
-                    } else if (userProfile.weightGoalType === 'maintain' && !isNaN(calculatedTdee)) {
-                        // If goal is maintain, target intake is TDEE
-                        calculatedTargetCaloricIntake = calculatedTdee;
                     }
-                }
             }
         }
-        return { bmr: calculatedBmr, tdee: calculatedTdee, targetCaloricIntake: calculatedTargetCaloricIntake };
+        return { 
+            bmr: calculatedBmr, 
+            tdee: calculatedTdee, 
+            targetCaloricIntake: calculatedTargetCaloricIntake,
+            caloriePredictionPoints: predictedPoints,
+            milestonePoints: foundMilestonePoints
+        };
     }, [userProfile, entries]); // Recalculate when userProfile or entries change
 
     // Local function to handle the new entry form submission
@@ -396,18 +477,36 @@ const BodyMetricsDashboard = () => {
             maxTimestamp = Date.now();
         }
 
-        // Calculate Lean Body Mass from the most recent entry for target weight calculation
-        let targetWeight = null;
-        let lastPredictedTimestamp = maxTimestamp;  // Initialize with the last historical timestamp
+        // Get the user's target weight from the profile, converted to the current display unit
+        let userTargetWeight = null;
+        if (userProfile?.targetWeight !== null && typeof userProfile?.targetWeight === 'number' && !isNaN(userProfile?.targetWeight)) {
+            userTargetWeight = userProfile.targetWeight;
+            // Convert target weight to the current display unit if necessary
+            // Assuming userProfile.weightUnit stores the unit the targetWeight is in
+            if (userProfile.weightUnit && userProfile.weightUnit !== weightUnit) {
+                if (weightUnit === 'lbs') {
+                    userTargetWeight = userProfile.weightUnit === 'kg' ? userTargetWeight * 2.20462 : userTargetWeight;
+                } else if (weightUnit === 'kg') {
+                    userTargetWeight = userProfile.weightUnit === 'lbs' ? userTargetWeight * 0.453592 : userTargetWeight;
+                }
+            }
+        }
+
+        // Determine the end timestamp for the chart based on the prediction points
+        let lastPredictedTimestamp = maxTimestamp;
+        if (caloriePredictionPoints.length > 0) {
+            lastPredictedTimestamp = caloriePredictionPoints[caloriePredictionPoints.length - 1].x;
+        }
 
         // --- Prepare data in Plotly format ---
         // Plotly expects an array of trace objects
         const plotlyData = [
-            // Weight trace
+            // Weight trace (Historical Data)
             {
-                x: validEntries.map(entry => entry.date),
+                x: validEntries.map(entry => entry.date.toISOString()),   // Convert Date objects to UTC ISO strings for consistent plotting
                 y: validEntries.map(entry => {
                     let weightValue = entry.weight;
+                    // Apply conversion only if the entry's stored unit is different from the current state unit
                     if (entry.weightUnit && entry.weightUnit !== weightUnit) {
                         if (weightUnit === 'lbs') {
                             weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
@@ -415,7 +514,7 @@ const BodyMetricsDashboard = () => {
                             weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
                         }
                     }
-                    return parseFloat(weightValue.toFixed(1));
+                    return typeof weightValue === 'number' && !isNaN(weightValue) ? parseFloat(weightValue.toFixed(1)) : null;
                 }),
                 mode: 'lines+markers',
                 name: `Weight (${weightUnit})`,
@@ -423,9 +522,9 @@ const BodyMetricsDashboard = () => {
                 marker: { size: 8 },
                 type: 'scatter',
             },
-            // Fat Mass trace
+            // Fat Mass trace (Historical Data)
             {
-                x: validEntries.map(entry => entry.date),
+                x: validEntries.map(entry => entry.date.toISOString()), // Convert Date objects to UTC strings for consistent plotting
                 y: validEntries.map(entry => {
                     const weight = entry.weight;
                     const bodyFatPercentage = entry.bodyFat;
@@ -438,7 +537,7 @@ const BodyMetricsDashboard = () => {
                             fatMass = entry.weightUnit === 'lbs' ? fatMass * 0.453592 : fatMass;
                         }
                     }
-                    return parseFloat(fatMass.toFixed(1));
+                    return typeof fatMass === 'number' && !isNaN(fatMass) ? parseFloat(fatMass.toFixed(1)) : null;
                 }),
                 mode: 'lines+markers',
                 name: `Fat Mass (${weightUnit})`,
@@ -448,7 +547,7 @@ const BodyMetricsDashboard = () => {
             },
             // Lean Mass trace
             {
-                x: validEntries.map(entry => entry.date),
+                x: validEntries.map(entry => entry.date.toISOString()),   // Convert Date objects to UTC ISO strings for consistent plotting
                 y: validEntries.map(entry => {
                     const weight = entry.weight;
                     const bodyFatPercentage = entry.bodyFat;
@@ -461,7 +560,7 @@ const BodyMetricsDashboard = () => {
                             leanMass = entry.weightUnit === 'lbs' ? leanMass * 0.453592 : leanMass;
                         }
                     }
-                    return parseFloat(leanMass.toFixed(1));
+                    return typeof leanMass === 'number' && !isNaN(leanMass) ? parseFloat(leanMass.toFixed(1)) : null;
                 }),
                 mode: 'lines+markers',
                 name: `Lean Mass (${weightUnit})`,
@@ -471,9 +570,11 @@ const BodyMetricsDashboard = () => {
             },
             // Linear Regression Trend Line trace
             {
+                // Convert timestamps to UTC ISO strings for consistent plotting
                 x: calculateLinearRegression(
                     validEntries.map(entry => {
                         let weightValue = entry.weight;
+                        // Convert weight to the *current display unit* before using in trend calculation
                         if (entry.weightUnit && entry.weightUnit !== weightUnit) {
                             if (weightUnit === 'lbs') {
                                 weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
@@ -483,7 +584,7 @@ const BodyMetricsDashboard = () => {
                         }
                         return { x: entry.date.getTime(), y: weightValue };
                     })
-                ).map(point => new Date(point.x)),
+                ).map(point => new Date(point.x).toISOString()),    // Convert timestamps back to UTC ISO strings for Plotly
                 y: calculateLinearRegression(
                     validEntries.map(entry => {
                         let weightValue = entry.weight;
@@ -502,63 +603,65 @@ const BodyMetricsDashboard = () => {
                 line: { color: 'rgb(0, 0, 0)', dash: 'dash' },
                 type: 'scatter',
             },
-            // ES Prediction trace will be added conditionally below
+            // --- Calorie Model Prediction trace ---
+            {
+                x: caloriePredictionPoints.map(point => new Date(point.x).toISOString()),
+                y: caloriePredictionPoints.map(point => typeof point.y === 'number' && !isNaN(point.y) ? parseFloat(point.y.toFixed(1)) : null),    // Map y values and format
+                mode: 'lines',
+                name: `Weight Prediction (Calorie Model)`,
+                line: { color: 'rgb(255, 165, 0)' },
+                type: 'scatter',
+            },
         ];
 
-        if (validEntries.length > 0) {
-            const lastEntry = validEntries[validEntries.length - 1];
-            const lastWeight = lastEntry.weight;
-            const lastBodyFatPercentage = lastEntry.bodyFat;
-
-            // Calculate Lean Body Mass based on the last entry's data
-            const leanBodyMass = lastWeight * (1 - (lastBodyFatPercentage / 100));
-            
-            // Calculate the target weight for 5% body fat
-            // Target Weight = Lean Body MASS (1 - Target Body Fat Percentage)
-            // TODO: Implement better weight forecasting formula/model
-            const targetBodyFatPercentage = 5;
-            targetWeight = leanBodyMass / (1 - (targetBodyFatPercentage / 100));
-
-            // Calculate Double Exponential Smoothing prediction points
-            const esPredictionPoints = calculateDoubleExponentialSmoothing(
-                validEntries.map(entry => {
-                    let weightValue = entry.weight;
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                        } else if (weightUnit === 'kg') {
-                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                        }
-                    }
-                    return { x: entry.date.getTime(), y: weightValue };
-                }),
-                alpha,
-                beta,
-                targetWeight
-            );
-
-            // Update lastPredictedTimestamp based on the last point in the prediction
-            if (esPredictionPoints.length > 0) {
-                lastPredictedTimestamp = esPredictionPoints[esPredictionPoints.length - 1].x;
-            }
-
-            // Add the ES prediction trace to plotlyData
-            const esTrace = {
-                x: esPredictionPoints.map(point => new Date(point.x)),
-                y: esPredictionPoints.map(point => parseFloat(point.y.toFixed(1))),
+        // Add a horizontal line for the target weight if it exists
+        if (userTargetWeight !== null && typeof userTargetWeight === 'number' && !isNaN(userTargetWeight)) {
+            plotlyData.push({
+                x: [new Date(minTimestamp).toISOString(), new Date(lastPredictedTimestamp).toISOString()], // Extend across the chart range
+                y: [userTargetWeight, userTargetWeight], // A constant line at the target weight
                 mode: 'lines',
-                name: `Weight Prediction (ES)`,
-                line: { color: 'rgb(255, 165, 0)', dash: 'dot' },
+                name: `Target Weight (${userProfile.targetWeight?.toFixed(1) || 'N/A'} ${userProfile.weightUnit || ''})`, // Use the user's entered target and unit
+                line: { color: 'rgb(0, 128, 0)', dash: 'dashdot' }, // Green dash-dot line
                 type: 'scatter',
-            };
-            plotlyData.push(esTrace);
-        } else {
-            console.log('Not enough data to calculate Lean Body Mass and Target Weight for prediction.');
-        }
-        return { plotlyData, minTimestamp, lastPredictedTimestamp };
-    }, [entries, weightUnit, alpha, beta]); // Dependencies for memoization
+            });
+        }        
 
-    const { plotlyData, minTimestamp, lastPredictedTimestamp } = memoizedChartData;
+        // Add Milestone points as annotations
+        const annotations = milestonePoints.map(milestone => ({
+            x: new Date(milestone.x).toISOString(), // Position annotation at the milestone date
+            y: milestone.y, // Position annotation at the predicted weight
+            xref: 'x', // Reference x-axis
+            yref: 'y', // Reference y-axis
+            text: milestone.label, // The label for the milestone
+            showarrow: true, // Show an arrow pointing to the point
+            arrowhead: 2, // Arrow style
+            ax: 0, // Annotation arrow x-position
+            ay: -40, // Annotation arrow y-position (offset from the point)
+            bgcolor: 'rgba(255, 255, 255, 0.8)', // Background color for the text
+            bordercolor: 'rgb(192, 192, 192)', // Border color for the text box
+            borderwidth: 1, // Border width
+            borderpad: 4, // Padding around the text
+            // Optional: Customize font, opacity, etc.
+        }));
+
+        return {
+            caloriePredictionPoints: caloriePredictionPoints,
+            milestonePoints: milestonePoints,
+            plotlyData: plotlyData, // Return the calculated plotlyData
+            minTimestamp: minTimestamp, // Return the calculated minTimestamp
+            lastPredictedTimestamp: lastPredictedTimestamp, // Return the calculated lastPredictedTimestamp
+            annotations: annotations // Return the calculated annotations
+        };
+
+    }, [entries, weightUnit, caloriePredictionPoints, milestonePoints, userProfile, predictionDays]); // Dependencies for memoization
+
+    // Destructure everything we need for the Plot
+    const {
+        plotlyData,
+        minTimestamp,
+        lastPredictedTimestamp,
+        annotations
+    } = memoizedChartData;
 
     const memoizedLayout = useMemo(() => {
         return {
@@ -574,26 +677,17 @@ const BodyMetricsDashboard = () => {
             },
             hovermode: 'closest',
             dragmode: 'pan',
-            margin: {
-                l: 50,
-                r: 50,
-                b: 80,
-                t: 50,
-                pad: 4
-            },
-            autosize: true,
-        };
-    }, [weightUnit, minTimestamp, lastPredictedTimestamp]); // Dependencies for layout memoization  
+            annotations,    // show milestone annotations
+        }
+    }, [weightUnit, minTimestamp, lastPredictedTimestamp, annotations]); // Dependencies for layout memoization  
 
 
     return (
         <div>
-            <h1>Body Metrics Dashboard</h1> {/* Main title */}
+            <h1>Body Metrics Dashboard</h1>
 
-            {/* --- Section: User Profile --- */}
             <div className="user-profile-section">
                 <h2>User Profile</h2>
-                {/* Display profile loading, errors, or messages */}
                 {profileLoading && <p>Loading profile...</p>}
                 {profileError && <p style={{ color: 'red' }}>{profileError}</p>}
                 {profileMessage && <p style={{ color: 'green' }}>{profileMessage}</p>}
@@ -627,7 +721,6 @@ const BodyMetricsDashboard = () => {
                         </select>
                     </div>
 
-                    {/* --- Weight Goal Fields --- */}
                     <div style={{ marginTop: '20px' }}>
                         <h4>Weight Goal</h4>
                         <div>
@@ -651,31 +744,40 @@ const BodyMetricsDashboard = () => {
                             </>
                         )}
                     </div>
-                    {/* --- End Weight Goal Fields --- */}
 
                     <button type="submit" disabled={saveProfileLoading}>
                         {saveProfileLoading ? 'Saving  Profile...' : 'Save Profile'}
                     </button>
                 </form>
 
-                {/* Display calculated BMR and TDEE */}
                 {!isNaN(bmr) && <p>Calculated BMR: {bmr.toFixed(0)} calories/day</p>}
                 {!isNaN(tdee) && <p>Calculated TDEE: {tdee.toFixed(0)} calories/day</p>}
+                
                 {!isNaN(targetCaloricIntake) && (
                     <p>Target Caloric Intake: {targetCaloricIntake.toFixed(0)} calories/day</p>
                 )}
+
+                {milestonePoints.length > 0 && (
+                    <div style={{ marginTop: '20px' }}>
+                        <h4>Predicted Milestones</h4>
+                        <ul>
+                            {milestonePoints.map((milestone, index) => (
+                                <li key={index}>
+                                    {milestone.label}: {new Date(milestone.x).toLocaleDateString()} - {milestone.y.toFixed(1)} {weightUnit} ({milestone.bodyFat.toFixed(1)}% BF)
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
             </div>
-            {/* --- End Section: User Profile --- */}
 
             <hr style={{ margin: '40px 0'}} />
 
-            <h2>Log Body Metrics</h2> {/* Section title for new entry form */}
+            <h2>Log Body Metrics</h2>
 
-            {/* Display save form errors or messages */}
             {saveError && <p style={{ color: 'red' }}>{saveError}</p>}
             {saveMessage && <p style={{ color: 'green' }}>{saveMessage}</p>}
 
-            {/* Form for logging new entries */}
             <form onSubmit={handleFormSubmit}>
                 <div>
                     <label htmlFor="date">Date:</label>
@@ -696,15 +798,14 @@ const BodyMetricsDashboard = () => {
                 </button>
             </form>
 
-            <hr style={{ margin: '40px 0'}} /> {/* Separator line */}
+            <hr style={{ margin: '40px 0'}} />
 
-            {/* --- Section: CSV Import --- */}
             <div className="csv-import-section"> {/* Optional class for styling */}
                 <h3>Import Entries from CSV</h3>
 
-                 {/* Display import errors or messages */}
-                 {importError && <p style={{ color: 'red' }}>{importError}</p>}
-                 {importMessage && <p style={{ color: 'green' }}>{importMessage}</p>}
+                {/* Display import errors or messages */}
+                {importError && <p style={{ color: 'red' }}>{importError}</p>}
+                {importMessage && <p style={{ color: 'green' }}>{importMessage}</p>}
 
                 {/* Conditional rendering based on import process state */}
 
@@ -724,7 +825,6 @@ const BodyMetricsDashboard = () => {
 
                 {/* 2. Show Parsing Status: Visible while PapaParse is working */}
                 {isParsing && <p>Parsing CSV...</p>}
-
 
                 {/* 3. Show Column Mapping Form: Visible after successful parsing IF mapping is not complete */}
                 {parsedCsvData && (!columnMapping.date || !columnMapping.weight || !columnMapping.bodyFat) && csvHeaders.length > 0 ? (
@@ -980,6 +1080,19 @@ const BodyMetricsDashboard = () => {
 
                     {/* Section to display the graph */}
                     <h3>Progress Graph</h3>
+                    <div style={{ marginBottom: '20px' }}>
+                        <label htmlFor="predictionDays">Forecast Days:</label>
+                        <input
+                            type="number"
+                            id="predictionDays"
+                            value={predictionDays}
+                            onChange={(e) => setPredictionDays(parseInt(e.target.value) || 0)}
+                            min="0"
+                            step="1"
+                            style={{ marginLeft: '10px', width: '80px' }}
+                        />
+                        <span> days</span>
+                    </div>                    
                     {/* Show graph only if not loading/error and entries exist */}
                     {!fetchLoading && !fetchError && entries.length > 0 && (
                         <div style={{ width: '100%', maxWidth: '1280px', margin: '20px auto', height: '720px' }}>

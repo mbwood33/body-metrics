@@ -1,105 +1,102 @@
 // src/utils/calculations.js
-import { addDays } from 'date-fns';
+
+import { addDays } from 'date-fns'; // Import addDays for prediction
 
 /**
- * Calculates the Basal Metabolic Rate (BMR) using the Mifflin-St Jeor equation.
- * BMR is the number of calories required to keep your body functioning at rest.
- * 
- * @param {object} params - Parameters for calculation
- * @param {'male' | 'female'} params.sex - The sex of the individual
- * @param {number} params.weight - The weight in kilograms
- * @param {number} params.height - The height in centimeters
- * @param {number} params.age - The age in years
- * @returns {number} The Basal Metabolic Rate (BMR) in calories per day
+ * Helper function to calculate age from date of birth.
+ * @param {Date} dateOfBirth - The user's date of birth as a Date object.
+ * @returns {number} The calculated age in years, or NaN if the input is invalid.
+ */
+export const calculateAge = (dateOfBirth) => {
+    if (!dateOfBirth || !(dateOfBirth instanceof Date) || isNaN(dateOfBirth.getTime())) {
+        return NaN;
+    }
+    const today = new Date();
+    let age = today.getFullYear() - dateOfBirth.getFullYear();
+    const monthDiff = today.getMonth() - dateOfBirth.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dateOfBirth.getDate())) {
+        age--;
+    }
+    return age;
+};
+
+
+/**
+ * Calculates Basal Metabolic Rate (BMR) using the Mifflin-St Jeor equation.
+ * @param {Object} params - Parameters for BMR calculation.
+ * @param {string} params.sex - 'male' or 'female'.
+ * @param {number} params.weight - Weight in kilograms.
+ * @param {number} params.height - Height in centimeters.
+ * @param {number} params.age - Age in years.
+ * @returns {number} Calculated BMR in calories per day, or NaN if inputs are invalid.
  */
 export const calculateBmr = ({ sex, weight, height, age }) => {
     // Validate inputs
-    if (typeof weight !== 'number' || weight <= 0 ||
-        typeof height !== 'number' || height <= 0 ||
-        typeof age !== 'number' || age <= 0 ||
-        (sex !== 'male' && sex !== 'female')) {
-            console.error('Invalid input for BMR calculation:', { sex, weight, height, age });
-            return NaN; // Return Not-a-Number for invalid input
+    if (typeof sex !== 'string' || (sex !== 'male' && sex !== 'female') ||
+        typeof weight !== 'number' || isNaN(weight) || weight <= 0 ||
+        typeof height !== 'number' || isNaN(height) || height <= 0 ||
+        typeof age !== 'number' || isNaN(age) || age <= 0) {
+        console.error('Invalid inputs for BMR calculation:', { sex, weight, height, age });
+        return NaN; // Return NaN for invalid inputs
     }
 
-    let bmr;
+    let bmr = 0;
     if (sex === 'male') {
-        // Mifflin-St Jeor equation for men: (10 * weight in kg) + (6.25 * height in cm) - (5 * age in years) + 5
         bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5;
-    } else {    // sex === 'female'
-        // Mifflin-St Jeor equation for women: (10 * weight in kg) + (6.25 * height in cm) - (5 * age in years) - 161
+    } else { // female
         bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161;
     }
-    
+
     return bmr;
 };
 
 /**
- * Calculates the Total Daily Energy Expenditure (TDEE) based on BMR and activity level.
- * TDEE is an estimate of how many calories you burn per day.
- * 
- * Activity Level Multipliers:
- * - sedentary: 1.2 (little to no exercise)
- * - lightly_active: 1.375 (exercises 1-3 days/week)
- * - moderately_active: 1.55 (exercises 4-5 days/week)
- * - very_active: 1.725 (exercises 6-7 days/week)
- * - super_active: 1.9 (very intense exercise daily or phsyically demanding job)
- * 
- * @param { number } bmr - The Basal Metabolic Rate in calories per day
- * @param {'sedentary' | 'lightly_active' | 'moderately_active' | 'very_active' | 'super_active'} activityLevel - The activity level of the individual
- * @returns {number} The calculated TDEE in calories per day
+ * Calculates Total Daily Energy Expenditure (TDEE) based on BMR and activity level.
+ * @param {number} bmr - Basal Metabolic Rate in calories per day.
+ * @param {string} activityLevel - Activity level ('sedentary', 'lightly_active', 'moderately_active', 'very_active', 'super_active').
+ * @returns {number} Calculated TDEE in calories per day, or NaN if inputs are invalid.
  */
 export const calculateTdee = (bmr, activityLevel) => {
+    // Activity factors
+    const activityFactors = {
+        sedentary: 1.2,
+        lightly_active: 1.375,
+        moderately_active: 1.55,
+        very_active: 1.725,
+        super_active: 1.9,
+    };
+
     // Validate inputs
-    if (typeof bmr !== 'number' || isNaN(bmr) || bmr <= 0 || typeof activityLevel !== 'string' || activityLevel === '') {
-        console.error('Invalid input for TDEE calculation:', { bmr, activityLevel });
-        return NaN; // Return Not-a-Number for invalid input
+    if (typeof bmr !== 'number' || isNaN(bmr) || bmr <= 0 ||
+        typeof activityLevel !== 'string' || !activityFactors[activityLevel]) {
+        console.error('Invalid inputs for TDEE calculation:', { bmr, activityLevel });
+        return NaN; // Return NaN for invalid inputs
     }
 
-    let multiplier;
-    switch (activityLevel) {
-        case 'sedentary':
-            multiplier = 1.2;
-            break;
-        case 'lightly_active':
-            multiplier = 1.375;
-            break;
-        case 'moderately_active':
-            multiplier = 1.55;
-            break;
-        case 'very_active':
-            multiplier = 1.725;
-            break;
-        case 'super_active':
-            multiplier = 1.9;
-            break;
-        default:
-            console.error('Unknown activity level for TDEE calculation:', activityLevel);
-            return NaN; // Return Not-a-Number for invalid input
-    }
-
-    return bmr * multiplier;
+    return bmr * activityFactors[activityLevel];
 };
 
+
 /**
- * Calculates points for a simple linear regression trend line
- * @param {Array<x: number, y: number>} datapoints - Array of data points with x (timestamp) and y (value).
- * @returns {Array<x: number, y: number>} Array of two points representing the start and end of the trend line.
+ * Calculates points for a linear regression trend line.
+ * @param {Array<Object>} dataPoints - Array of points { x: timestamp, y: value }.
+ * @returns {Array<Object>} Array of { x: timestamp, y: value } points for the trend line.
  */
 export const calculateLinearRegression = (dataPoints) => {
     if (dataPoints.length < 2) {
-        return [];  // Need at least two points for a line
+        return []; // Need at least two points for a line
     }
 
     // Filter out points with invalid x or y values
     const validPoints = dataPoints.filter(p => typeof p.x === 'number' && !isNaN(p.x) && typeof p.y === 'number' && !isNaN(p.y));
 
     if (validPoints.length < 2) {
-        return [];
+         return [];
     }
 
     // Sort points by x (timestamp) to ensure correct min/max
     validPoints.sort((a, b) => a.x - b.x);
+
 
     // Calculate sums needed for linear regression (y = mx + b)
     let sumX = 0;
@@ -118,9 +115,9 @@ export const calculateLinearRegression = (dataPoints) => {
     // Calculate slope (m) and y-intercept (b)
     const denominator = (n * sumXX - sumX * sumX);
     if (denominator === 0) {
-        return [];  // Avoid division by zero if all x values are the same
+        return []; // Avoid division by zero if all x values are the same
     }
-    const m = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const m = (n * sumXY - sumX * sumY) / denominator;
     const b = (sumY - m * sumX) / n;
 
     // Calculate the y values for the trend line at the min and max x values
@@ -133,106 +130,225 @@ export const calculateLinearRegression = (dataPoints) => {
     ];
 
     return trendLinePoints;
-}
+};
+
 
 /**
- * Calculates prediction points using Double Exponential Smoothing (Holt's Method).
- * Predicts dynamically until a target weight is reached or a maximum prediction duration is met.
- * @param {Array<{x: number, y: number}>} dataPoints - Array of historical data points with x (timestamp) and y (value).
- * @param {number} alpha - Smoothing factor for the level (0 to 1).
- * @param {number} beta - Smoothing factor for the trend (0 to 1).
- * @param {number} targetValue - The weight at which to stop predicting.
- * @returns {Array<{x: number, y: number}>} Array of prediction points including the last historical point.
+ * Predicts future weight based on the last entry, target caloric intake, and user profile.
+ * Uses a simplified model assuming a linear relationship between calorie deficit/surplus and weight change.
+ * Also predicts body fat percentage based on a simple linear projection from the last entry's body fat and weight.
+ *
+ * @param {Object} params - Parameters for prediction.
+ * @param {Object} params.lastEntry - The most recent body metrics entry { date: Date, weight: number, bodyFat: number, weightUnit: string }.
+ * @param {number} params.targetCaloricIntake - The calculated target daily caloric intake.
+ * @param {Object} params.userProfile - The user's profile { sex: string, dateOfBirth: Date, height: number (inches), activityLevel: string, weightGoalType: string, targetWeight: number|null, targetRate: number|null, weightUnit: string|null }.
+ * @param {number} [params.predictionDays=90] - Number of days into the future to predict.
+ * @returns {Array<Object>} An array of predicted points { x: timestamp, y: predictedWeight, bodyFat: predictedBodyFat }.
  */
-export const calculateDoubleExponentialSmoothing = (dataPoints, alpha, beta, targetValue = null) => {
-    if (dataPoints.length < 2 || alpha < 0 || alpha > 1 || beta < 0 || beta > 1) {
-        // Need at least two points for initial trend, and valid alpha/beta
-        return [];
+export const predictWeightCalorieModel = ({ lastEntry, targetCaloricIntake, userProfile, predictionDays = 90 }) => {
+    console.log('predictWeightCalorieModel: Received inputs:', { lastEntry, targetCaloricIntake, userProfile, predictionDays });
+
+    // --- Detailed Input Validation ---
+    let isValid = true;
+    const validationErrors = [];
+
+    if (!lastEntry || typeof lastEntry !== 'object') {
+        isValid = false;
+        validationErrors.push('lastEntry is missing or not an object.');
+    } else {
+        if (!(lastEntry.date instanceof Date) || isNaN(lastEntry.date.getTime())) {
+            isValid = false;
+            validationErrors.push('lastEntry.date is missing or not a valid Date.');
+        }
+        if (typeof lastEntry.weight !== 'number' || isNaN(lastEntry.weight) || lastEntry.weight <= 0) {
+            isValid = false;
+            validationErrors.push('lastEntry.weight is missing, not a number, or not positive.');
+        }
+         // Body fat is optional for the *weight* prediction itself, but needed for BF prediction
+        if (typeof lastEntry.bodyFat !== 'number' || isNaN(lastEntry.bodyFat) || lastEntry.bodyFat < 0 || lastEntry.bodyFat > 100) {
+             console.warn('predictWeightCalorieModel: lastEntry.bodyFat is missing or invalid. Body fat prediction may be inaccurate or skipped.', lastEntry.bodyFat);
+             // Don't set isValid to false just for bodyFat if weight/date are okay, but warn.
+        }
+        if (typeof lastEntry.weightUnit !== 'string' || lastEntry.weightUnit === '') {
+             isValid = false;
+             validationErrors.push('lastEntry.weightUnit is missing or not a string.');
+        }
     }
 
-    // Filter and sort valid points
-    const validPoints = dataPoints.filter(p => typeof p.x === 'number' && !isNaN(p.x) && typeof p.y === 'number' && !isNaN(p.y));
-    if (validPoints.length < 2) {
-        return []; // Need at least two points for initial level and trend
+    if (typeof targetCaloricIntake !== 'number' || isNaN(targetCaloricIntake) || targetCaloricIntake < 0) {
+        isValid = false;
+        validationErrors.push('targetCaloricIntake is missing, not a number, or negative.');
     }
-    validPoints.sort((a, b) => a.x - b.x);
+
+    if (!userProfile || typeof userProfile !== 'object') {
+        isValid = false;
+        validationErrors.push('userProfile is missing or not an object.');
+    } else {
+        if (typeof userProfile.sex !== 'string' || (userProfile.sex !== 'male' && userProfile.sex !== 'female')) {
+            isValid = false;
+            validationErrors.push('userProfile.sex is missing or invalid.');
+        }
+        if (!(userProfile.dateOfBirth instanceof Date) || isNaN(userProfile.dateOfBirth.getTime())) {
+            isValid = false;
+            validationErrors.push('userProfile.dateOfBirth is missing or not a valid Date.');
+        }
+        if (typeof userProfile.height !== 'number' || isNaN(userProfile.height) || userProfile.height <= 0) {
+            isValid = false;
+            validationErrors.push('userProfile.height is missing, not a number, or not positive.');
+        }
+        if (typeof userProfile.activityLevel !== 'string' || userProfile.activityLevel === '') {
+             isValid = false;
+             validationErrors.push('userProfile.activityLevel is missing or empty.');
+        }
+         if (typeof userProfile.weightGoalType !== 'string' || userProfile.weightGoalType === '') {
+              isValid = false;
+              validationErrors.push('userProfile.weightGoalType is missing or empty.');
+         }
+         // Check target weight/rate only if goal is not maintain
+         if (userProfile.weightGoalType !== 'maintain') {
+             if (typeof userProfile.targetWeight !== 'number' || isNaN(userProfile.targetWeight) || userProfile.targetWeight <= 0) {
+                 isValid = false;
+                 validationErrors.push('userProfile.targetWeight is missing, not a number, or not positive when goal is not maintain.');
+             }
+              if (typeof userProfile.targetRate !== 'number' || isNaN(userProfile.targetRate) || userProfile.targetRate <= 0) {
+                 isValid = false;
+                 validationErrors.push('userProfile.targetRate is missing, not a number, or not positive when goal is not maintain.');
+             }
+         }
+         // Note: userProfile.weightUnit is used for converting target weight/rate, but not strictly required for the core prediction if target is null
+    }
+
+     if (typeof predictionDays !== 'number' || isNaN(predictionDays) || predictionDays <= 0) {
+         isValid = false;
+         validationErrors.push('predictionDays is missing, not a number, or not positive.');
+     }
 
 
-    // Initialize Level (L) and Trend (T)
-    // Initial Level: Use the first data point's y-value
-    let L = validPoints[0].y;
-    // Initial Trend: Use the difference between the first two points
-    let T = validPoints[1].y - validPoints[0].y; // Assuming equally spaced points for simplicity
+    if (!isValid) {
+        console.error('Invalid inputs for calorie model prediction:', { lastEntry, targetCaloricIntake, userProfile, predictionDays });
+        console.error('Validation Errors:', validationErrors);
+        return []; // Return empty array if inputs are invalid
+    }
+    // --- End Detailed Input Validation ---
+
+
+    // Constants
+    const CALORIES_PER_LB = 3500; // Approximate calories in one pound of fat
+    const DAYS_IN_WEEK = 7;
+
+    // Convert last entry weight to lbs for calculation consistency if needed
+    let lastWeightLbs = lastEntry.weight;
+    if (lastEntry.weightUnit === 'kg') {
+        lastWeightLbs = lastEntry.weight * 2.20462; // Convert kg to lbs
+    }
+
+    // Calculate the user's current TDEE based on the last entry's weight and profile
+     // Need to convert weight back to kg for BMR calculation
+     const lastWeightKg = lastWeightLbs * 0.453592;
+     const age = calculateAge(userProfile.dateOfBirth); // Now calculateAge is available here
+     const heightInCm = userProfile.height * 2.54; // Need height in cm
+
+     const currentBmr = calculateBmr({
+         sex: userProfile.sex,
+         weight: lastWeightKg,
+         height: heightInCm,
+         age: age
+     });
+
+     const currentTdee = calculateTdee(currentBmr, userProfile.activityLevel);
+
+
+    // Calculate the daily calorie deficit or surplus based on the target intake vs current TDEE
+    // Note: This is a simplification. A more complex model would account for TDEE changing as weight changes.
+    const dailyCalorieDifference = targetCaloricIntake - currentTdee;
+
+    // Calculate daily weight change in lbs
+    const dailyWeightChangeLbs = dailyCalorieDifference / CALORIES_PER_LB;
 
     const predictedPoints = [];
+    let currentWeightLbs = lastWeightLbs;
+    let currentBodyFat = lastEntry.bodyFat; // Start with the last recorded body fat
+    let currentDate = new Date(lastEntry.date.getTime()); // Start from the last entry date
 
-    // Calculate smoothed values for historical data and store them for prediction
-    // Start from the second point as the first is used for initialization
-    for (let i = 1; i < validPoints.length; i++) {
-        const previousL = L;
-        const previousT = T;
+    // Calculate Lean Body Mass (LBM) from the last entry
+    // Assuming lastEntry.weight is in lastEntry.weightUnit and lastEntry.bodyFat is percentage
+    let lastWeightInKgForLBM = lastEntry.weight;
+     if (lastEntry.weightUnit === 'lbs') {
+         lastWeightInKgForLBM = lastEntry.weight * 0.453592; // Convert lbs to kg for LBM formula
+     }
 
-        // Calculate new Level
-        L = alpha * validPoints[i].y + (1 - alpha) * (previousL + previousT);
+    // Using the Boer formula for LBM (common and relatively simple)
+    // LBM (kg) = 0.407 * weight (kg) + 0.267 * height (cm) - 19.2 for men
+    // LBM (kg) = 0.252 * weight (kg) + 0.473 * height (cm) - 48.3 for women
+    let lastLbmKg = 0;
+    const heightInCmForLBM = userProfile.height * 2.54; // Need height in cm
 
-        // Calculate new Trend
-        T = beta * (L - previousL) + (1 - beta) * previousT;
+    if (userProfile.sex === 'male') {
+        lastLbmKg = 0.407 * lastWeightInKgForLBM + 0.267 * heightInCmForLBM - 19.2;
+    } else { // female
+        lastLbmKg = 0.252 * lastWeightInKgForLBM + 0.473 * heightInCmForLBM - 48.3;
     }
 
-    // Predict future points
-    const lastHistoricalPoint = validPoints[validPoints.length - 1];
-    const lastHistoricalTimestamp = lastHistoricalPoint.x;
-    const lastHistoricalValue = lastHistoricalPoint.y; // Use the actual last value for the start of prediction line
+    // Convert last LBM to the last entry's weight unit for consistency in calculation
+    let lastLbmOriginalUnit = lastLbmKg;
+     if (lastEntry.weightUnit === 'lbs') {
+         lastLbmOriginalUnit = lastLbmKg * 2.20462; // Convert kg to lbs
+     }
 
-    // Add the last historical point to the prediction array to connect the lines
+
+    // Add the last historical point as the starting point of the prediction line
     predictedPoints.push({
-        x: lastHistoricalTimestamp,
-        y: lastHistoricalValue
+        x: currentDate.getTime(),
+        y: lastEntry.weight, // Use weight in its original unit
+        bodyFat: currentBodyFat // Use last recorded body fat (corrected variable name)
     });
 
-    // Determine the time step for prediction (assuming daily entries for simplicity)
-    // Calculate the average time difference between historical points
-    let totalTimeDiff = 0;
-    for (let i = 1; i < validPoints.length; i++) {
-        totalTimeDiff += validPoints[i].x - validPoints[i-1].x;
-    }
-    const averageTimeStep = validPoints.length > 1 ? totalTimeDiff / (validPoints.length - 1) : 24 * 60 * 60 * 1000; // Default to 1 day in milliseconds if only 1 point
 
+    // Project future weight and body fat day by day
+    for (let i = 1; i <= predictionDays; i++) {
+        currentDate = addDays(currentDate, 1); // Move to the next day
 
-    // Predict future points
-    const numFuturePoints = 30; // Predict 30 days into the future
-    let currentTimestamp = lastHistoricalTimestamp;
-    let currentL = L;
-    let currentT = T;
+        // Predict the new weight for the day in lbs
+        currentWeightLbs += dailyWeightChangeLbs;
 
-    for (let i = 1; i <= numFuturePoints; i++) {
-        currentTimestamp += averageTimeStep; // Move forward by the average time step
-
-        // Predict the next value
-        let predictedValue = currentL + currentT;
-
-        // Optional: Adjust prediction towards a target value over time
-        if (targetValue !== null && typeof targetValue === 'number' && !isNaN(targetValue)) {
-            // Simple adjustment: gradually move prediction towards the target
-            // The strength of this adjustment could be a separate parameter or based on distance
-            const adjustmentFactor = 0.1; // Adjust by 10% of the difference each step
-            predictedValue = predictedValue + (targetValue - predictedValue) * adjustmentFactor;
+        // Convert the predicted weight back to the last entry's unit for consistency
+        let predictedWeightOriginalUnit = currentWeightLbs;
+        if (lastEntry.weightUnit === 'kg') {
+            predictedWeightOriginalUnit = currentWeightLbs * 0.453592; // Convert lbs to kg
         }
 
+        // Predict body fat percentage for the day
+        // This is a very simple model: Assume LBM remains constant and all weight change is fat mass.
+        // Fat Mass = Total Weight - LBM
+        // Predicted Fat Mass (Original Unit) = Predicted Weight (Original Unit) - Last LBM (Original Unit)
+        const predictedFatMassOriginalUnit = predictedWeightOriginalUnit - lastLbmOriginalUnit;
 
+        // Ensure predicted fat mass is not negative
+        const clampedPredictedFatMass = Math.max(0, predictedFatMassOriginalUnit);
+
+        // Predicted Body Fat % = (Predicted Fat Mass / Predicted Weight) * 100
+        // Avoid division by zero if predicted weight is zero or negative (shouldn't happen with positive daily change)
+        let predictedBodyFat = 0;
+        if (predictedWeightOriginalUnit > 0) {
+             predictedBodyFat = (clampedPredictedFatMass / predictedWeightOriginalUnit) * 100;
+        }
+
+        // Ensure body fat percentage is within a reasonable range (e.g., 0-100)
+        predictedBodyFat = Math.max(0, Math.min(100, predictedBodyFat));
+
+
+        // Add the predicted point to the array
         predictedPoints.push({
-            x: currentTimestamp, // Use the calculated future timestamp
-            y: predictedValue // The predicted value
+            x: currentDate.getTime(), // Use timestamp for x-value
+            y: predictedWeightOriginalUnit, // Predicted weight in the last entry's unit
+            bodyFat: predictedBodyFat // Predicted body fat percentage
         });
-
-        // Update L and T for the next prediction step (using the predicted value as the "actual" for the next step)
-        // This is a simplification; a more complex model would use the actual future values if available,
-        // but for pure prediction, we use the forecast as the basis for the next forecast.
-        currentL = alpha * predictedValue + (1 - alpha) * (currentL + currentT);
-        currentT = beta * (currentL - L) + (1 - beta) * currentT; // L here is the L from the previous step
-        L = currentL; // Update L for the next iteration's trend calculation
-
     }
+
+    console.log('predictWeightCalorieModel: Generated predictionPoints', predictedPoints);
 
     return predictedPoints;
 };
+
+// Removed Double Exponential Smoothing functions as they are no longer used
+// export const calculateDoubleExponentialSmoothing = ...
