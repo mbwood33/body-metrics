@@ -10,7 +10,7 @@ import {
     calculateLinearRegression,
     calculateBmr,
     calculateTdee,
-    predictWeightCalorieModel,
+    predictWeightLinearDifference,
     calculateAge
 } from '../utils/calculations.js';
 
@@ -182,11 +182,11 @@ const BodyMetricsDashboard = () => {
     };
 
     // --- Calculate BMR, TDEE, Target Caloric Intake, and Prediction using useMemo ---
-    const { bmr, tdee, targetCaloricIntake, caloriePredictionPoints, milestonePoints } = useMemo(() => {
+    const { bmr, tdee, targetCaloricIntake, linearDifferencePredictionPoints, milestonePoints, plotlyData, minTimestamp, lastPredictedTimestamp, annotations } = useMemo(() => {
         let calculatedBmr = NaN;
         let calculatedTdee = NaN;
         let calculatedTargetCaloricIntake = NaN;
-        let predictedPoints = [];
+        let predictedPoints = [];   // Use predictedPoints inside the hook
         const foundMilestonePoints = [];
 
         // Find the most recent weight entry
@@ -256,21 +256,21 @@ const BodyMetricsDashboard = () => {
                             calculatedTargetCaloricIntake = calculatedTdee;
                         }
 
-                        // --- Calculate Calorie Model Prediction ---
+                        // --- Calculate Linear Difference Model Prediction ---
+                        // Add checks for essential user profile properties before calling the prediction model
                         if (!isNaN(calculatedTargetCaloricIntake) && latestEntry && userProfile &&
                             typeof userProfile.sex === 'string' && userProfile.sex !== '' &&
                             userProfile.dateOfBirth instanceof Date && !isNaN(userProfile.dateOfBirth.getTime()) &&
                             typeof userProfile.height === 'number' && !isNaN(userProfile.height) && userProfile.height > 0 &&
                             typeof userProfile.activityLevel === 'string' && userProfile.activityLevel !== '' &&
-                            typeof userProfile.weightGoalType === 'string' && userProfile.weightGoalType !== '' &&
-                            (userProfile.weightGoalType === 'maintain' || (typeof userProfile.targetWeight === 'number' && !isNaN(userProfile.targetWeight) && typeof userProfile.targetRate === 'number' && !isNaN(userProfile.targetRate) && userProfile.targetRate > 0))
+                            typeof predictionDays === 'number' && !isNaN(predictionDays) && predictionDays >= 0
                             ) {
                             // Pass the last entry, calculated target intake, and user profile to the new model
-                            predictedPoints = predictWeightCalorieModel({
-                                lastEntry: latestEntry, // Pass the full entry object
+                            predictedPoints = predictWeightLinearDifference({ // Assign to predictedPoints
+                                lastEntry: latestEntry, // Pass the full last entry object
                                 targetCaloricIntake: calculatedTargetCaloricIntake,
-                                userProfile: userProfile,
-                                predictionDays: predictionDays
+                                userProfile: userProfile, // Pass the full user profile object
+                                predictionDays: predictionDays // Pass the predictionDays state to the function
                             });
 
                             // --- Find Milestone Points on the Prediction ---
@@ -279,24 +279,32 @@ const BodyMetricsDashboard = () => {
                                 : [];   // Add gain milestones later if needed (e.g., target weight reached)
                                 // TODO: Add milestones for weight goal gain
                                 // TODO: Calculate body fat % milestones for weight loss based on current body fat percentage
-                            
+
+
                             let lastPredictedBodyFat = latestEntry.bodyFat; // Start with last historical BF%
 
                             // Iterate through predicted points to find milestones
-                            for (const point of predictedPoints) {
+                            // Start from the second point (index 1) because the first point is the last historical entry
+                            for (let i = 1; i < predictedPoints.length; i++) {
+                                const point = predictedPoints[i];
+                                const previousPoint = predictedPoints[i - 1];
+
                                 // Check for Body Fat % milestones (only if losing and milestones defined)
                                 if (userProfile.weightGoalType === 'lose' && milestones.length > 0) {
                                     for (const milestoneBF of milestones) {
-                                        // Check if the prediction crossed this milestone since the last point
+                                        // Check if the prediction crossed this milestone between the previous and current point
                                         // We need to check if the current point's BF is below the milestone
                                         // AND the previous point's BF was above or equal to the milestone
-                                        if (point.bodyFat <= milestoneBF && lastPredictedBodyFat > milestoneBF) {
-                                            foundMilestonePoints.push({
-                                                x: point.x, // Timestamp of the predicted point
-                                                y: point.y, // Predicted weight at this point
-                                                bodyFat: point.bodyFat, // Predicted body fat at this point
-                                                label: `${milestoneBF}% BF` // Label for the milestone
-                                            });
+                                        if (point.bodyFat <= milestoneBF && previousPoint.bodyFat > milestoneBF) {
+                                            // Check if this milestone hasn't been added yet
+                                            if (!foundMilestonePoints.some(m => m.label === `${milestoneBF}% BF`)) {
+                                                foundMilestonePoints.push({
+                                                    x: point.x, // Timestamp of the predicted point
+                                                    y: point.y, // Predicted weight at this point
+                                                    bodyFat: point.bodyFat, // Predicted body fat at this point
+                                                    label: `${milestoneBF}% BF` // Label for the milestone
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -315,11 +323,11 @@ const BodyMetricsDashboard = () => {
                                     }
 
                                     // Check if the prediction crossed the target weight
-                                    // Get weight from previous predicted point or last entry
-                                    const lastPredictedWeight = predictedPoints.length > 1 && predictedPoints[predictedPoints.length - 2] ? predictedPoints[predictedPoints.length - 2].y : latestEntry.weight;
+                                    const lastPredictedWeight = previousPoint.y;
+
 
                                     // Check if current weight is below target AND previous was above (for loss)
-                                    if (userProfile.weightGoalType === 'lose' && point.y <= targetWeightInPredictionUnit && lastPredictedWeight  > targetWeightInPredictionUnit) {
+                                    if (userProfile.weightGoalType === 'lose' && point.y <= targetWeightInPredictionUnit && lastPredictedWeight > targetWeightInPredictionUnit) {
                                         // Ensure we only add the first time it crosses the target
                                         if (!foundMilestonePoints.some(m => m.label.startsWith('Target Weight'))) {
                                             foundMilestonePoints.push({
@@ -343,25 +351,210 @@ const BodyMetricsDashboard = () => {
                                         }
                                     }
                                 }
-
-                                // Update last predicted body fat for the next iteration's check
-                                lastPredictedBodyFat = point.bodyFat;
                             }
 
                             // Sort milestone points by date
                             foundMilestonePoints.sort((a, b) => a.x - b.x);
+
+                        } else {
+                            console.warn("Skipping linear difference prediction due to invalid or missing user profile/entry data.");
+                            // Optionally, set a state here to display a message to the user
                         }
                     }
             }
         }
-        return { 
-            bmr: calculatedBmr, 
-            tdee: calculatedTdee, 
+
+        // Calculate min and max timestamps for the chart axis based on historical and predicted data
+        let minTimestamp = Date.now();
+        let maxTimestamp = Date.now();
+
+        const allPoints = [...entries, ...predictedPoints]; // Combine historical and predicted points
+
+        if (allPoints.length > 0) {
+            // Filter out points with invalid dates before finding min/max
+            const validPointsWithDates = allPoints.filter(p => p.date instanceof Date && !isNaN(p.date.getTime()) || typeof p.x === 'number' && !isNaN(p.x));
+
+            if (validPointsWithDates.length > 0) {
+                minTimestamp = validPointsWithDates[0].date?.getTime() || validPointsWithDates[0].x;
+                maxTimestamp = validPointsWithDates[0].date?.getTime() || validPointsWithDates[0].x;
+
+                for (const point of validPointsWithDates) {
+                    const timestamp = point.date?.getTime() || point.x;
+                    if (typeof timestamp === 'number' && !isNaN(timestamp)) {
+                        if (timestamp < minTimestamp) {
+                            minTimestamp = timestamp;
+                        }
+                        if (timestamp > maxTimestamp) {
+                            maxTimestamp = timestamp;
+                        }
+                    }
+                }
+            }
+        }
+
+
+        // Determine the end timestamp for the chart based on the prediction points
+        let lastPredictedTimestamp = maxTimestamp;
+        if (predictedPoints.length > 0) { // Use predictedPoints here
+            lastPredictedTimestamp = predictedPoints[predictedPoints.length - 1].x; // Use predictedPoints here
+        }
+
+
+        // --- Prepare data in Plotly format ---
+        // Plotly expects an array of trace objects
+        const plotlyData = [
+            {
+                // Weight trace (Historical Data)
+                // Convert Date objects to UTC ISO strings for consistent plotting
+                x: entries.map(entry => entry.date instanceof Date ? entry.date.toISOString() : null).filter(x => x !== null), // Filter out null dates
+                y: entries.map(entry => {
+                    let weightValue = entry.weight;
+                    // Apply conversion only if the entry's stored unit is different from the current state unit
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                             weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                        } else if (weightUnit === 'kg') {
+                             weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                         }
+                    }
+                    return typeof weightValue === 'number' && !isNaN(weightValue) ? parseFloat(weightValue.toFixed(1)) : null;
+                }),
+                mode: 'lines+markers', // Show both lines and markers
+                name: `Weight (${weightUnit})`,
+                line: { color: 'rgb(75, 192, 192)' },
+                marker: { size: 8 },
+                type: 'scatter', // Scatter plot type for lines and markers
+            },
+            {
+                // Fat Mass trace (Historical Data)
+                // Convert Date objects to UTC ISO strings for consistent plotting
+                x: entries.map(entry => entry.date instanceof Date ? entry.date.toISOString() : null).filter(x => x !== null), // Filter out null dates
+                y: entries.map(entry => {
+                    const weight = entry.weight;
+                    const bodyFatPercentage = entry.bodyFat;
+                    let fatMass = (weight * (bodyFatPercentage / 100));
+
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            fatMass = entry.weightUnit === 'kg' ? fatMass * 2.20462 : fatMass;
+                        } else if (entry.weightUnit === 'kg') {
+                            fatMass = entry.weightUnit === 'lbs' ? fatMass * 0.453592 : fatMass;
+                        }
+                    }
+                    return typeof fatMass === 'number' && !isNaN(fatMass) ? parseFloat(fatMass.toFixed(1)) : null;
+                }),
+                mode: 'lines+markers',
+                name: `Fat Mass (${weightUnit})`,
+                line: { color: 'rgb(255, 99, 132)' }, // Reddish
+                marker: { size: 8 },
+                type: 'scatter',
+            },
+            {
+                // Lean Mass trace (Historical Data)
+                // Convert Date objects to UTC ISO strings for consistent plotting
+                x: entries.map(entry => entry.date instanceof Date ? entry.date.toISOString() : null).filter(x => x !== null), // Filter out null dates
+                y: entries.map(entry => {
+                    const weight = entry.weight;
+                    const bodyFatPercentage = entry.bodyFat;
+                    let leanMass = (weight - (weight * (bodyFatPercentage / 100)));
+
+                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                        if (weightUnit === 'lbs') {
+                            leanMass = entry.weightUnit === 'kg' ? leanMass * 2.20462 : leanMass;
+                        } else if (weightUnit === 'kg') {
+                            leanMass = entry.weightUnit === 'lbs' ? leanMass * 0.453592 : leanMass;
+                        }
+                    }
+                    return typeof leanMass === 'number' && !isNaN(leanMass) ? parseFloat(leanMass.toFixed(1)) : null;
+                }),
+                mode: 'lines+markers',
+                name: `Lean Mass (${weightUnit})`,
+                line: { color: 'rgb(53, 162, 235)' }, // Bluish
+                marker: { size: 8 },
+                type: 'scatter',
+            },
+            {
+                // Linear Regression Trend Line trace
+                // Convert timestamps to UTC ISO strings for consistent plotting
+                x: calculateLinearRegression(
+                    entries.map(entry => {
+                         // Use date's timestamp as the x-value for linear regression
+                        const xValue = entry.date instanceof Date && !isNaN(entry.date.getTime()) ? entry.date.getTime() : NaN;
+
+                        let weightValue = entry.weight;
+                        // Convert weight to the *current display unit* before using in trend calculation
+                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                            if (weightUnit === 'lbs') {
+                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                            } else if (weightUnit === 'kg') {
+                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                            }
+                        }
+                        return { x: xValue, y: weightValue };
+                    })
+                ).map(point => new Date(point.x).toISOString()), // Convert timestamps back to UTC ISO strings for Plotly
+                y: calculateLinearRegression(
+                    entries.map(entry => {
+                        // Use date's timestamp as the x-value for linear regression
+                    const xValue = entry.date instanceof Date && !isNaN(entry.date.getTime()) ? entry.date.getTime() : NaN;
+
+                        let weightValue = entry.weight;
+                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
+                            if (weightUnit === 'lbs') {
+                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
+                            } else if (weightUnit === 'kg') {
+                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
+                            }
+                        }
+                        return { x: xValue, y: weightValue };
+                    })
+                ).map(point => typeof point.y === 'number' && !isNaN(point.y) ? parseFloat(point.y.toFixed(1)) : null), // Map y values and format
+                mode: 'lines',
+                name: `Weight Trend (Linear)`,
+                line: { color: 'rgb(0, 0, 0)', dash: 'dash' }, // Black dashed line
+                type: 'scatter',
+            },
+            // --- Linear Difference Model Prediction trace ---
+            {
+                x: predictedPoints.map(point => new Date(point.x).toISOString()), // Use predictedPoints here
+                y: predictedPoints.map(point => typeof point.y === 'number' && !isNaN(point.y) ? parseFloat(point.y.toFixed(1)) : null), // Use predictedPoints here
+                mode: 'lines',
+                name: `Weight Prediction (Linear Difference)`, // Updated name
+                line: { color: 'rgb(255, 165, 0)' }, // Orange line
+                type: 'scatter',
+            },
+        ];
+
+        // Add Milestone points as annotations
+        const annotations = foundMilestonePoints.map(milestone => ({ // Use foundMilestonePoints here
+            x: new Date(milestone.x).toISOString(), // Position annotation at the milestone date
+            y: milestone.y, // Position annotation at the predicted weight
+            xref: 'x', // Reference x-axis
+            yref: 'y', // Reference y-axis
+            text: milestone.label, // The label for the milestone
+            showarrow: true, // Show an arrow pointing to the point
+            arrowhead: 2, // Arrow style
+            ax: 0, // Annotation arrow x-position
+            ay: -40, // Annotation arrow y-position (offset from the point)
+            bgcolor: 'rgba(255, 255, 255, 0.8)', // Background color for the text
+            bordercolor: '#c0c0c0', // Border color for the text box
+            borderwidth: 1, // Border width
+            borderpad: 4, // Padding around the text
+            // Optional: Customize font, opacity, etc.
+        }));
+
+        return {
+            bmr: calculatedBmr,
+            tdee: calculatedTdee,
             targetCaloricIntake: calculatedTargetCaloricIntake,
-            caloriePredictionPoints: predictedPoints,
-            milestonePoints: foundMilestonePoints
+            linearDifferencePredictionPoints: predictedPoints, // Return predictedPoints
+            milestonePoints: foundMilestonePoints, // Return foundMilestonePoints
+            plotlyData: plotlyData, // Return the calculated plotlyData
+            minTimestamp: minTimestamp, // Return the calculated minTimestamp
+            lastPredictedTimestamp: lastPredictedTimestamp, // Return the calculated lastPredictedTimestamp
+            annotations: annotations // Return the calculated annotations
         };
-    }, [userProfile, entries]); // Recalculate when userProfile or entries change
+    }, [entries, weightUnit, userProfile, predictionDays]); // Recalculate when userProfile or entries change
 
     // Local function to handle the new entry form submission
     const handleFormSubmit = (e) => {
@@ -453,233 +646,36 @@ const BodyMetricsDashboard = () => {
     };
 
 
-
-    // --- Prepare data for the chart (Memoized) ---
-    const memoizedChartData = useMemo(() => {
-        // Filter and sort valid entries inside useMemo
-        const validEntries = entries.filter(entry =>
-            entry.date instanceof Date && !isNaN(entry.date.getTime()) &&
-            typeof entry.weight === 'number' && !isNaN(entry.weight) &&
-            typeof entry.bodyFat === 'number' && !isNaN(entry.bodyFat)
-        );
-
-        validEntries.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-        // Calculate min and max timestamps from valid entries for chart axis manually
-        let minTimestamp = Date.now();
-        let maxTimestamp = 0;
-
-        if (validEntries.length > 0) {
-            minTimestamp = validEntries[0].date.getTime();
-            maxTimestamp = validEntries[validEntries.length - 1].date.getTime();
-        } else {
-            minTimestamp = Date.now();
-            maxTimestamp = Date.now();
-        }
-
-        // Get the user's target weight from the profile, converted to the current display unit
-        let userTargetWeight = null;
-        if (userProfile?.targetWeight !== null && typeof userProfile?.targetWeight === 'number' && !isNaN(userProfile?.targetWeight)) {
-            userTargetWeight = userProfile.targetWeight;
-            // Convert target weight to the current display unit if necessary
-            // Assuming userProfile.weightUnit stores the unit the targetWeight is in
-            if (userProfile.weightUnit && userProfile.weightUnit !== weightUnit) {
-                if (weightUnit === 'lbs') {
-                    userTargetWeight = userProfile.weightUnit === 'kg' ? userTargetWeight * 2.20462 : userTargetWeight;
-                } else if (weightUnit === 'kg') {
-                    userTargetWeight = userProfile.weightUnit === 'lbs' ? userTargetWeight * 0.453592 : userTargetWeight;
-                }
-            }
-        }
-
-        // Determine the end timestamp for the chart based on the prediction points
-        let lastPredictedTimestamp = maxTimestamp;
-        if (caloriePredictionPoints.length > 0) {
-            lastPredictedTimestamp = caloriePredictionPoints[caloriePredictionPoints.length - 1].x;
-        }
-
-        // --- Prepare data in Plotly format ---
-        // Plotly expects an array of trace objects
-        const plotlyData = [
-            // Weight trace (Historical Data)
-            {
-                x: validEntries.map(entry => entry.date.toISOString()),   // Convert Date objects to UTC ISO strings for consistent plotting
-                y: validEntries.map(entry => {
-                    let weightValue = entry.weight;
-                    // Apply conversion only if the entry's stored unit is different from the current state unit
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                        } else if (weightUnit === 'kg') {
-                            weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                        }
-                    }
-                    return typeof weightValue === 'number' && !isNaN(weightValue) ? parseFloat(weightValue.toFixed(1)) : null;
-                }),
-                mode: 'lines+markers',
-                name: `Weight (${weightUnit})`,
-                line: { color: 'rgb(75, 192, 192)' },
-                marker: { size: 8 },
-                type: 'scatter',
-            },
-            // Fat Mass trace (Historical Data)
-            {
-                x: validEntries.map(entry => entry.date.toISOString()), // Convert Date objects to UTC strings for consistent plotting
-                y: validEntries.map(entry => {
-                    const weight = entry.weight;
-                    const bodyFatPercentage = entry.bodyFat;
-                    let fatMass = (weight * (bodyFatPercentage / 100));
-
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            fatMass = entry.weightUnit === 'kg' ? fatMass * 2.20462 : fatMass;
-                        } else if (weightUnit === 'kg') {
-                            fatMass = entry.weightUnit === 'lbs' ? fatMass * 0.453592 : fatMass;
-                        }
-                    }
-                    return typeof fatMass === 'number' && !isNaN(fatMass) ? parseFloat(fatMass.toFixed(1)) : null;
-                }),
-                mode: 'lines+markers',
-                name: `Fat Mass (${weightUnit})`,
-                line: { color: 'rgb(255, 99, 132)' },
-                marker: { size: 8 },
-                type: 'scatter',
-            },
-            // Lean Mass trace
-            {
-                x: validEntries.map(entry => entry.date.toISOString()),   // Convert Date objects to UTC ISO strings for consistent plotting
-                y: validEntries.map(entry => {
-                    const weight = entry.weight;
-                    const bodyFatPercentage = entry.bodyFat;
-                    let leanMass = (weight - (weight * (bodyFatPercentage / 100)));
-
-                    if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                        if (weightUnit === 'lbs') {
-                            leanMass = entry.weightUnit === 'kg' ? leanMass * 2.20462 : leanMass;
-                        } else if (weightUnit === 'kg') {
-                            leanMass = entry.weightUnit === 'lbs' ? leanMass * 0.453592 : leanMass;
-                        }
-                    }
-                    return typeof leanMass === 'number' && !isNaN(leanMass) ? parseFloat(leanMass.toFixed(1)) : null;
-                }),
-                mode: 'lines+markers',
-                name: `Lean Mass (${weightUnit})`,
-                line: { color: 'rgb(53, 162, 235)' },
-                marker: { size: 8 },
-                type: 'scatter',
-            },
-            // Linear Regression Trend Line trace
-            {
-                // Convert timestamps to UTC ISO strings for consistent plotting
-                x: calculateLinearRegression(
-                    validEntries.map(entry => {
-                        let weightValue = entry.weight;
-                        // Convert weight to the *current display unit* before using in trend calculation
-                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                            if (weightUnit === 'lbs') {
-                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                            } else if (weightUnit === 'kg') {
-                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                            }
-                        }
-                        return { x: entry.date.getTime(), y: weightValue };
-                    })
-                ).map(point => new Date(point.x).toISOString()),    // Convert timestamps back to UTC ISO strings for Plotly
-                y: calculateLinearRegression(
-                    validEntries.map(entry => {
-                        let weightValue = entry.weight;
-                        if (entry.weightUnit && entry.weightUnit !== weightUnit) {
-                            if (weightUnit === 'lbs') {
-                                weightValue = entry.weightUnit === 'kg' ? weightValue * 2.20462 : weightValue;
-                            } else if (weightUnit === 'kg') {
-                                weightValue = entry.weightUnit === 'lbs' ? weightValue * 0.453592 : weightValue;
-                            }
-                        }
-                        return { x: entry.date.getTime(), y: weightValue };
-                    })
-                ).map(point => parseFloat(point.y.toFixed(1))),
-                mode: 'lines',
-                name: `Weight Trend (Linear)`,
-                line: { color: 'rgb(0, 0, 0)', dash: 'dash' },
-                type: 'scatter',
-            },
-            // --- Calorie Model Prediction trace ---
-            {
-                x: caloriePredictionPoints.map(point => new Date(point.x).toISOString()),
-                y: caloriePredictionPoints.map(point => typeof point.y === 'number' && !isNaN(point.y) ? parseFloat(point.y.toFixed(1)) : null),    // Map y values and format
-                mode: 'lines',
-                name: `Weight Prediction (Calorie Model)`,
-                line: { color: 'rgb(255, 165, 0)' },
-                type: 'scatter',
-            },
-        ];
-
-        // Add a horizontal line for the target weight if it exists
-        if (userTargetWeight !== null && typeof userTargetWeight === 'number' && !isNaN(userTargetWeight)) {
-            plotlyData.push({
-                x: [new Date(minTimestamp).toISOString(), new Date(lastPredictedTimestamp).toISOString()], // Extend across the chart range
-                y: [userTargetWeight, userTargetWeight], // A constant line at the target weight
-                mode: 'lines',
-                name: `Target Weight (${userProfile.targetWeight?.toFixed(1) || 'N/A'} ${userProfile.weightUnit || ''})`, // Use the user's entered target and unit
-                line: { color: 'rgb(0, 128, 0)', dash: 'dashdot' }, // Green dash-dot line
-                type: 'scatter',
-            });
-        }        
-
-        // Add Milestone points as annotations
-        const annotations = milestonePoints.map(milestone => ({
-            x: new Date(milestone.x).toISOString(), // Position annotation at the milestone date
-            y: milestone.y, // Position annotation at the predicted weight
-            xref: 'x', // Reference x-axis
-            yref: 'y', // Reference y-axis
-            text: milestone.label, // The label for the milestone
-            showarrow: true, // Show an arrow pointing to the point
-            arrowhead: 2, // Arrow style
-            ax: 0, // Annotation arrow x-position
-            ay: -40, // Annotation arrow y-position (offset from the point)
-            bgcolor: 'rgba(255, 255, 255, 0.8)', // Background color for the text
-            bordercolor: 'rgb(192, 192, 192)', // Border color for the text box
-            borderwidth: 1, // Border width
-            borderpad: 4, // Padding around the text
-            // Optional: Customize font, opacity, etc.
-        }));
-
-        return {
-            caloriePredictionPoints: caloriePredictionPoints,
-            milestonePoints: milestonePoints,
-            plotlyData: plotlyData, // Return the calculated plotlyData
-            minTimestamp: minTimestamp, // Return the calculated minTimestamp
-            lastPredictedTimestamp: lastPredictedTimestamp, // Return the calculated lastPredictedTimestamp
-            annotations: annotations // Return the calculated annotations
-        };
-
-    }, [entries, weightUnit, caloriePredictionPoints, milestonePoints, userProfile, predictionDays]); // Dependencies for memoization
-
-    // Destructure everything we need for the Plot
-    const {
-        plotlyData,
-        minTimestamp,
-        lastPredictedTimestamp,
-        annotations
-    } = memoizedChartData;
-
     const memoizedLayout = useMemo(() => {
         return {
             title: `Body Metrics Progress and Prediction (${weightUnit})`,
             xaxis: {
                 title: 'Date',
-                type: 'date',
-                range: [new Date(minTimestamp), new Date(lastPredictedTimestamp)],
-                rangeslider: { visible: true },
+                type: 'date', // Set x-axis type to 'date'
+                 // Use Date objects for the range, Plotly should handle them with type 'date'
+                 range: [new Date(minTimestamp), new Date(lastPredictedTimestamp)],
+                 rangeslider: { visible: true }, // Add a range slider for easier navigation
             },
             yaxis: {
                 title: `Measurement (${weightUnit})`,
             },
-            hovermode: 'closest',
-            dragmode: 'pan',
-            annotations,    // show milestone annotations
-        }
-    }, [weightUnit, minTimestamp, lastPredictedTimestamp, annotations]); // Dependencies for layout memoization  
+            hovermode: 'closest', // Show tooltip for the closest point
+            // Add dragmode for pan/zoom
+            dragmode: 'pan', // 'zoom' or 'pan'
+            // Optional: Add a range slider or selector for easier navigation
+            // shapes, annotations, and other layout customizations can go here
+            margin: {
+                l: 50, // left margin
+                r: 50, // right margin
+                b: 80, // bottom margin (increased for range slider)
+                t: 50, // top margin
+                pad: 4 // padding
+            },
+            // Ensure responsiveness
+            autosize: true,
+            annotations: annotations // Add the annotations to the layout
+        };
+    }, [weightUnit, minTimestamp, lastPredictedTimestamp, annotations]); // Dependencies for layout memoization
 
 
     return (

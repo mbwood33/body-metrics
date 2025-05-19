@@ -50,6 +50,15 @@ export const calculateBmr = ({ sex, weight, height, age }) => {
     return bmr;
 };
 
+// Activity Level Multipliers (Harris-Benedict standard, commonly used with Mifflin-St Jeor)
+const activityMultipliers = {
+    sedentary: 1.2,
+    lightly_active: 1.375,
+    moderately_active: 1.55,
+    very_active: 1.725,
+    super_active: 1.9,
+};
+
 /**
  * Calculates Total Daily Energy Expenditure (TDEE) based on BMR and activity level.
  * @param {number} bmr - Basal Metabolic Rate in calories per day.
@@ -57,24 +66,18 @@ export const calculateBmr = ({ sex, weight, height, age }) => {
  * @returns {number} Calculated TDEE in calories per day, or NaN if inputs are invalid.
  */
 export const calculateTdee = (bmr, activityLevel) => {
-    // Activity factors
-    const activityFactors = {
-        sedentary: 1.2,
-        lightly_active: 1.375,
-        moderately_active: 1.55,
-        very_active: 1.725,
-        super_active: 1.9,
-    };
-
-    // Validate inputs
-    if (typeof bmr !== 'number' || isNaN(bmr) || bmr <= 0 ||
-        typeof activityLevel !== 'string' || !activityFactors[activityLevel]) {
-        console.error('Invalid inputs for TDEE calculation:', { bmr, activityLevel });
-        return NaN; // Return NaN for invalid inputs
+    if (typeof bmr !== 'number' || isNaN(bmr) || bmr <= 0) {
+        console.error("calculateTdee: Invalid BMR value.");
+        return NaN;
+    }
+    if (!activityMultipliers[activityLevel]) {
+        console.error("calculateTdee: Invalid activity level specified.");
+        return NaN;
     }
 
-    return bmr * activityFactors[activityLevel];
+    return bmr * activityMultipliers[activityLevel];
 };
+
 
 
 /**
@@ -132,223 +135,145 @@ export const calculateLinearRegression = (dataPoints) => {
     return trendLinePoints;
 };
 
+// Function to predict weight using a first-order linear difference equation
+// based on the provided formula: W(t+1) = r*W(t) + b
+// W(t) is weight in kg on day t
+// r = 1 - m * (10 * 0.453592) / 3500
+// b = (I - m * c) / 3500
+// m is activity factor (from activityMultipliers)
+// I is fixed daily intake (approx 0.8 * TDEE_0, where TDEE_0 is TDEE at initial weight)
+// c = 6.25 * H_cm - 5 * A + 5 (non-weight part of Mifflin-St Jeor)
+export const predictWeightLinearDifference = ({ lastEntry, targetCaloricIntake, userProfile, predictionDays }) => {
+    console.log('predictWeightLinearDifference: Inputs:', { lastEntry, targetCaloricIntake, userProfile, predictionDays });
 
-/**
- * Predicts future weight based on the last entry, target caloric intake, and user profile.
- * Uses a simplified model assuming a linear relationship between calorie deficit/surplus and weight change.
- * Also predicts body fat percentage based on a simple linear projection from the last entry's body fat and weight.
- *
- * @param {Object} params - Parameters for prediction.
- * @param {Object} params.lastEntry - The most recent body metrics entry { date: Date, weight: number, bodyFat: number, weightUnit: string }.
- * @param {number} params.targetCaloricIntake - The calculated target daily caloric intake.
- * @param {Object} params.userProfile - The user's profile { sex: string, dateOfBirth: Date, height: number (inches), activityLevel: string, weightGoalType: string, targetWeight: number|null, targetRate: number|null, weightUnit: string|null }.
- * @param {number} [params.predictionDays=90] - Number of days into the future to predict.
- * @returns {Array<Object>} An array of predicted points { x: timestamp, y: predictedWeight, bodyFat: predictedBodyFat }.
- */
-export const predictWeightCalorieModel = ({ lastEntry, targetCaloricIntake, userProfile, predictionDays = 90 }) => {
-    console.log('predictWeightCalorieModel: Received inputs:', { lastEntry, targetCaloricIntake, userProfile, predictionDays });
-
-    // --- Detailed Input Validation ---
-    let isValid = true;
-    const validationErrors = [];
-
-    if (!lastEntry || typeof lastEntry !== 'object') {
-        isValid = false;
-        validationErrors.push('lastEntry is missing or not an object.');
-    } else {
-        if (!(lastEntry.date instanceof Date) || isNaN(lastEntry.date.getTime())) {
-            isValid = false;
-            validationErrors.push('lastEntry.date is missing or not a valid Date.');
-        }
-        if (typeof lastEntry.weight !== 'number' || isNaN(lastEntry.weight) || lastEntry.weight <= 0) {
-            isValid = false;
-            validationErrors.push('lastEntry.weight is missing, not a number, or not positive.');
-        }
-         // Body fat is optional for the *weight* prediction itself, but needed for BF prediction
-        if (typeof lastEntry.bodyFat !== 'number' || isNaN(lastEntry.bodyFat) || lastEntry.bodyFat < 0 || lastEntry.bodyFat > 100) {
-             console.warn('predictWeightCalorieModel: lastEntry.bodyFat is missing or invalid. Body fat prediction may be inaccurate or skipped.', lastEntry.bodyFat);
-             // Don't set isValid to false just for bodyFat if weight/date are okay, but warn.
-        }
-        if (typeof lastEntry.weightUnit !== 'string' || lastEntry.weightUnit === '') {
-             isValid = false;
-             validationErrors.push('lastEntry.weightUnit is missing or not a string.');
-        }
+    if (!lastEntry || typeof lastEntry.weight !== 'number' || isNaN(lastEntry.weight) || !lastEntry.date || !(lastEntry.date instanceof Date) || isNaN(lastEntry.date.getTime())) {
+        console.error("predictWeightLinearDifference: Invalid last entry data.");
+        return [];
     }
-
-    if (typeof targetCaloricIntake !== 'number' || isNaN(targetCaloricIntake) || targetCaloricIntake < 0) {
-        isValid = false;
-        validationErrors.push('targetCaloricIntake is missing, not a number, or negative.');
+    if (!userProfile || typeof userProfile.sex !== 'string' || !userProfile.dateOfBirth || !(userProfile.dateOfBirth instanceof Date) || isNaN(userProfile.dateOfBirth.getTime()) || typeof userProfile.height !== 'number' || isNaN(userProfile.height) || userProfile.height <= 0 || typeof userProfile.activityLevel !== 'string') {
+         console.error("predictWeightLinearDifference: Invalid user profile data.");
+         return [];
     }
-
-    if (!userProfile || typeof userProfile !== 'object') {
-        isValid = false;
-        validationErrors.push('userProfile is missing or not an object.');
-    } else {
-        if (typeof userProfile.sex !== 'string' || (userProfile.sex !== 'male' && userProfile.sex !== 'female')) {
-            isValid = false;
-            validationErrors.push('userProfile.sex is missing or invalid.');
-        }
-        if (!(userProfile.dateOfBirth instanceof Date) || isNaN(userProfile.dateOfBirth.getTime())) {
-            isValid = false;
-            validationErrors.push('userProfile.dateOfBirth is missing or not a valid Date.');
-        }
-        if (typeof userProfile.height !== 'number' || isNaN(userProfile.height) || userProfile.height <= 0) {
-            isValid = false;
-            validationErrors.push('userProfile.height is missing, not a number, or not positive.');
-        }
-        if (typeof userProfile.activityLevel !== 'string' || userProfile.activityLevel === '') {
-             isValid = false;
-             validationErrors.push('userProfile.activityLevel is missing or empty.');
-        }
-         if (typeof userProfile.weightGoalType !== 'string' || userProfile.weightGoalType === '') {
-              isValid = false;
-              validationErrors.push('userProfile.weightGoalType is missing or empty.');
-         }
-         // Check target weight/rate only if goal is not maintain
-         if (userProfile.weightGoalType !== 'maintain') {
-             if (typeof userProfile.targetWeight !== 'number' || isNaN(userProfile.targetWeight) || userProfile.targetWeight <= 0) {
-                 isValid = false;
-                 validationErrors.push('userProfile.targetWeight is missing, not a number, or not positive when goal is not maintain.');
-             }
-              if (typeof userProfile.targetRate !== 'number' || isNaN(userProfile.targetRate) || userProfile.targetRate <= 0) {
-                 isValid = false;
-                 validationErrors.push('userProfile.targetRate is missing, not a number, or not positive when goal is not maintain.');
-             }
-         }
-         // Note: userProfile.weightUnit is used for converting target weight/rate, but not strictly required for the core prediction if target is null
-    }
-
-     if (typeof predictionDays !== 'number' || isNaN(predictionDays) || predictionDays <= 0) {
-         isValid = false;
-         validationErrors.push('predictionDays is missing, not a number, or not positive.');
+     if (typeof targetCaloricIntake !== 'number' || isNaN(targetCaloricIntake) || targetCaloricIntake < 0) {
+         console.warn("predictWeightLinearDifference: Invalid target caloric intake. Prediction may be inaccurate or empty.");
+         // We might still attempt prediction if other data is valid, but log a warning
      }
-
-
-    if (!isValid) {
-        console.error('Invalid inputs for calorie model prediction:', { lastEntry, targetCaloricIntake, userProfile, predictionDays });
-        console.error('Validation Errors:', validationErrors);
-        return []; // Return empty array if inputs are invalid
-    }
-    // --- End Detailed Input Validation ---
-
-
-    // Constants
-    const CALORIES_PER_LB = 3500; // Approximate calories in one pound of fat
-    const DAYS_IN_WEEK = 7;
-
-    // Convert last entry weight to lbs for calculation consistency if needed
-    let lastWeightLbs = lastEntry.weight;
-    if (lastEntry.weightUnit === 'kg') {
-        lastWeightLbs = lastEntry.weight * 2.20462; // Convert kg to lbs
+    if (typeof predictionDays !== 'number' || isNaN(predictionDays) || predictionDays <= 0) {
+        console.warn("predictWeightLinearDifference: Invalid prediction days. Returning empty prediction.");
+        return [];
     }
 
-    // Calculate the user's current TDEE based on the last entry's weight and profile
-     // Need to convert weight back to kg for BMR calculation
-     const lastWeightKg = lastWeightLbs * 0.453592;
-     const age = calculateAge(userProfile.dateOfBirth); // Now calculateAge is available here
-     const heightInCm = userProfile.height * 2.54; // Need height in cm
+    // Convert last entry weight to kg if necessary
+    let W0_kg = lastEntry.weight;
+    if (lastEntry.weightUnit === 'lbs') {
+        W0_kg = lastEntry.weight * 0.453592;
+    }
 
-     const currentBmr = calculateBmr({
-         sex: userProfile.sex,
-         weight: lastWeightKg,
-         height: heightInCm,
-         age: age
-     });
+    const age = calculateAge(userProfile.dateOfBirth);
+    const heightInCm = userProfile.height * 2.54;
+    const activityFactor = activityMultipliers[userProfile.activityLevel];
 
-     const currentTdee = calculateTdee(currentBmr, userProfile.activityLevel);
-
-
-    // Calculate the daily calorie deficit or surplus based on the target intake vs current TDEE
-    // Note: This is a simplification. A more complex model would account for TDEE changing as weight changes.
-    const dailyCalorieDifference = targetCaloricIntake - currentTdee;
-
-    // Calculate daily weight change in lbs
-    const dailyWeightChangeLbs = dailyCalorieDifference / CALORIES_PER_LB;
-
-    const predictedPoints = [];
-    let currentWeightLbs = lastWeightLbs;
-    let currentBodyFat = lastEntry.bodyFat; // Start with the last recorded body fat
-    let currentDate = new Date(lastEntry.date.getTime()); // Start from the last entry date
-
-    // Calculate Lean Body Mass (LBM) from the last entry
-    // Assuming lastEntry.weight is in lastEntry.weightUnit and lastEntry.bodyFat is percentage
-    let lastWeightInKgForLBM = lastEntry.weight;
-     if (lastEntry.weightUnit === 'lbs') {
-         lastWeightInKgForLBM = lastEntry.weight * 0.453592; // Convert lbs to kg for LBM formula
-     }
-
-    // Using the Boer formula for LBM (common and relatively simple)
-    // LBM (kg) = 0.407 * weight (kg) + 0.267 * height (cm) - 19.2 for men
-    // LBM (kg) = 0.252 * weight (kg) + 0.473 * height (cm) - 48.3 for women
-    let lastLbmKg = 0;
-    const heightInCmForLBM = userProfile.height * 2.54; // Need height in cm
-
+    // Calculate the constant 'c' (non-weight part of Mifflin-St Jeor)
+    let c = (6.25 * heightInCm) - (5 * age);
     if (userProfile.sex === 'male') {
-        lastLbmKg = 0.407 * lastWeightInKgForLBM + 0.267 * heightInCmForLBM - 19.2;
-    } else { // female
-        lastLbmKg = 0.252 * lastWeightInKgForLBM + 0.473 * heightInCmForLBM - 48.3;
+        c += 5;
+    } else if (userProfile.sex === 'female') {
+        c -= 161;
+    } else {
+        console.error("predictWeightLinearDifference: Cannot calculate constant 'c' due to invalid sex.");
+        return [];
     }
 
-    // Convert last LBM to the last entry's weight unit for consistency in calculation
-    let lastLbmOriginalUnit = lastLbmKg;
-     if (lastEntry.weightUnit === 'lbs') {
-         lastLbmOriginalUnit = lastLbmKg * 2.20462; // Convert kg to lbs
-     }
+    // Calculate the constant 'r'
+    // r = 1 - m * (10 * 0.453592) / 3500
+    const r = 1 - (activityFactor * (10 * 0.453592) / 3500);
 
+    // Calculate the constant 'b'
+    // b = (I - m * c) / 3500
+    const I = targetCaloricIntake;  // Use the calculated target caloric intake
+    const b = (I - (activityFactor * c)) / 3500;
 
-    // Add the last historical point as the starting point of the prediction line
-    predictedPoints.push({
-        x: currentDate.getTime(),
-        y: lastEntry.weight, // Use weight in its original unit
-        bodyFat: currentBodyFat // Use last recorded body fat (corrected variable name)
+    console.log('predictWeightLinearDifference: Calculated constants:', { r, b, c, I, activityFactor, W0_kg });
+
+    // Calculate the equilibrium weight W_infinity = b / (1 - r)
+    let W_infinity_kg = NaN;
+    if (1 - r !== 0) {
+        W_infinity_kg = b / (1 - r);
+    }
+    console.log('predictWeightLinearDifference: Calculated equilibrium weight (kg):', W_infinity_kg);
+
+    // Calculate the last recorded lean body mass in kg
+    const lastWeightKg = W0_kg; // Last weight in kg
+    const lastBodyFatPercentage = lastEntry.bodyFat; // Last body fat percentage
+    const lastFatMassKg = lastWeightKg * (lastBodyFatPercentage / 100);
+    const lastLeanBodyMassKg = lastWeightKg - lastFatMassKg;
+
+    console.log('predictWeightLinearDifference: Last Lean Body Mass (kg):', lastLeanBodyMassKg);
+    
+    // Calculate prediction points using the explicit solution: W(t) = W_infinity + (W0 - W_infinity) * r^t
+    // t represents the number of days *after* the last entry date
+    const predictionPoints = [];
+    const lastEntryTimestamp = lastEntry.date.getTime();
+
+    predictionPoints.push({
+        x: lastEntryTimestamp,
+        y: lastEntry.weight,
+        bodyFat: lastEntry.bodyFat
     });
 
+    for (let t = 1; t <= predictionDays; t++) {
+        const futureDate = addDays(lastEntry.date, t);
+        const futureTimestamp = futureDate.getTime();
 
-    // Project future weight and body fat day by day
-    for (let i = 1; i <= predictionDays; i++) {
-        currentDate = addDays(currentDate, 1); // Move to the next day
-
-        // Predict the new weight for the day in lbs
-        currentWeightLbs += dailyWeightChangeLbs;
-
-        // Convert the predicted weight back to the last entry's unit for consistency
-        let predictedWeightOriginalUnit = currentWeightLbs;
-        if (lastEntry.weightUnit === 'kg') {
-            predictedWeightOriginalUnit = currentWeightLbs * 0.453592; // Convert lbs to kg
+        // Calculate the predicted weight in kg for day t
+        let Wt_kg;
+        if (!isNaN(W_infinity_kg)) {
+            Wt_kg = W_infinity_kg + (W0_kg - W_infinity_kg) * Math.pow(r, t);
         }
 
-        // Predict body fat percentage for the day
-        // This is a very simple model: Assume LBM remains constant and all weight change is fat mass.
-        // Fat Mass = Total Weight - LBM
-        // Predicted Fat Mass (Original Unit) = Predicted Weight (Original Unit) - Last LBM (Original Unit)
-        const predictedFatMassOriginalUnit = predictedWeightOriginalUnit - lastLbmOriginalUnit;
-
-        // Ensure predicted fat mass is not negative
-        const clampedPredictedFatMass = Math.max(0, predictedFatMassOriginalUnit);
-
-        // Predicted Body Fat % = (Predicted Fat Mass / Predicted Weight) * 100
-        // Avoid division by zero if predicted weight is zero or negative (shouldn't happen with positive daily change)
-        let predictedBodyFat = 0;
-        if (predictedWeightOriginalUnit > 0) {
-             predictedBodyFat = (clampedPredictedFatMass / predictedWeightOriginalUnit) * 100;
+        // Convert the predicted weight back to the last entry's original unit for consistency with other chart data
+        let Wt_display = Wt_kg;
+        if (lastEntry.weightUnit === 'lbs') {
+            Wt_display = Wt_kg * 2.20462;
         }
 
-        // Ensure body fat percentage is within a reasonable range (e.g., 0-100)
-        predictedBodyFat = Math.max(0, Math.min(100, predictedBodyFat));
+        // Simple linear interpolation for body fat percentage change over time
+        // This is a simplification; a more complex model would be needed for accurate BF% prediction
+        // Assuming a linear change from the last recorded BF% towards a target BF% (e.g., ~15% for men, ~20% for women)
+        // Or, a simple linear decrease/increase based on weight change
+        // Let's use a simple linear change towards a hypothetical target BF% over the prediction period
+        const lastBodyFat = lastEntry.bodyFat;
+        const targetBodyFat = userProfile.sex === 'male' ? 15 : 20; // Hypothetical target BF%
+        const bfChangePerDay = (targetBodyFat - lastBodyFat) / predictionDays;  // Rate of change per day
 
+        let predictedBodyFat = lastBodyFat + (bfChangePerDay * t);
+        if (!isNaN(Wt_kg) && Wt_kg > 0 && !isNaN(lastLeanBodyMassKg)) {
+            // Ensure predicted weight is not less than lean body mass to avoid negative fat mass
+            const predictedFatMassKg = Math.max(0, Wt_kg - lastLeanBodyMassKg);
+            predictedBodyFat = (predictedFatMassKg / Wt_kg) * 100;
 
-        // Add the predicted point to the array
-        predictedPoints.push({
-            x: currentDate.getTime(), // Use timestamp for x-value
-            y: predictedWeightOriginalUnit, // Predicted weight in the last entry's unit
-            bodyFat: predictedBodyFat // Predicted body fat percentage
-        });
+            // Ensure predicted body fat stays within a reasonable range (e.g., 5% to 40%)
+            predictedBodyFat = Math.max(5, Math.min(40, predictedBodyFat));
+        }
+
+        if (!isNaN(Wt_display)) {
+            predictionPoints.push({
+                x: futureTimestamp,
+                y: Wt_display,
+                bodyFat: predictedBodyFat
+            });
+        }
     }
 
-    console.log('predictWeightCalorieModel: Generated predictionPoints', predictedPoints);
+    console.log('predictWeightLinearDifference: Generated predictionPoints:', predictionPoints);
+    return predictionPoints;
+}
 
-    return predictedPoints;
+// Placeholder for predictWeightCalorieModel (will be replaced by linear difference model)
+// Keeping it here for now to avoid breaking the BodyMetricsDashboard component before the update
+export const predictWeightCalorieModel = ({ lastEntry, targetCaloricIntake, userProfile, predictionDays = 90 }) => {
+    console.warn("Using placeholder predictWeightCalorieModel. Please update to use predictWeightLinearDifference.");
+    // Return an empty array or some dummy data if needed
+    return [];
 };
 
-// Removed Double Exponential Smoothing functions as they are no longer used
-// export const calculateDoubleExponentialSmoothing = ...
